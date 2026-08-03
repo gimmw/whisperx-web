@@ -1,6 +1,6 @@
 # WhisperX Web 
 
-Basic Drop-and-Transcribe web UI for WhisperX transcription.
+Basic Drop-and-Transcribe web UI and backend for WhisperX transcription.
 
 Fork of [one-among-us/whisper-web](https://github.com/one-among-us/whisper-web) swapping `faster-whisper` for [WhisperX](https://github.com/m-bain/whisperX)
 
