@@ -1,18 +1,30 @@
-# Whisper Web
+# WhisperX Web 
 
-Web application for accurate speech-to-text conversion, powered by OpenAI Whisper and Pyannote.
+Basic Drop-and-Transcribe web UI for WhisperX transcription.
 
-[whisper.hydev.org](https://whisper.hydev.org)
+Fork of [one-among-us/whisper-web](https://github.com/one-among-us/whisper-web) swapping `faster-whisper` for [WhisperX](https://github.com/m-bain/whisperX)
+
+![Frontend Upload page](screenshot1.png){height=306}
 
 ## Features
 
 * Speech-to-text with timestamps
-* Speaker identification
+* Speaker diarisation
 
-**Performance**
-
-Currently, the model can process 2 hours of audio in 12 minutes on an RTX 3060 graphics card.
 
 ## Deployment Instructions
 
-TODO
+TODO 
+
+Frontend environment variables:
+* BACKEND_HOST - public backend URL
+* TITLE - optional header title
+
+Backend environment variables:
+* HF_TOKEN - huggingface api token
+
+
+## LLM Disclosure 🤖🧠
+
+The WhisperX integration and additional features in this fork were added using AI agents as pair programmer.
+I recognise LLM use is ethically complex and carries a heavy environmental burden. As a non-programmer, I aim to thoughtfully balance the use of LLMs against the value it provides.

@@ -10,7 +10,7 @@ from typing import NamedTuple
 
 import GPUtil
 import uvicorn
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, Form, UploadFile, File
 from hypy_utils import write, write_json
 from starlette.middleware.cors import CORSMiddleware
 from starlette.staticfiles import StaticFiles
@@ -45,6 +45,11 @@ app.mount("/result", StaticFiles(directory=DATA_DIR / "transcription"), name="re
 class PendingProcess(NamedTuple):
     audio_id: str
     file: Path
+    language: str = "en"
+    diarize: bool = True
+    min_speakers: int | None = None
+    max_speakers: int | None = None
+    initial_prompt: str = ""
 
 
 @app.get('/health')
@@ -53,7 +58,14 @@ def health():
 
 
 @app.post("/upload")
-async def upload(file: UploadFile = File(...)):
+async def upload(
+    file: UploadFile = File(...),
+    language: str = Form("en"),
+    diarize: str = Form("true"),
+    min_speakers: str | None = Form(None),
+    max_speakers: str | None = Form(None),
+    initial_prompt: str = Form(""),
+):
     try:
         contents = await file.read()
 
@@ -67,9 +79,14 @@ async def upload(file: UploadFile = File(...)):
         fp = DATA_DIR / "audio" / f"{audio_id}.{ext}"
         write(fp, contents)
 
+        # Parse diarization options
+        do_diarize = diarize.lower() == "true"
+        min_spk = int(min_speakers) if min_speakers else None
+        max_spk = int(max_speakers) if max_speakers else None
+
         # Add to processing queue
         with lock:
-            process_queue.append(PendingProcess(audio_id, fp))
+            process_queue.append(PendingProcess(audio_id, fp, language, do_diarize, min_spk, max_spk, initial_prompt.strip()))
 
         return {"audio_id": audio_id}
 
@@ -94,8 +111,8 @@ async def progress(uuid: str):
         return {"done": False, "status": "Error", "error": errors[uuid]}
     else:
         index = 0
-        for i, (audio_id, _) in enumerate(process_queue):
-            if audio_id == uuid:
+        for i, pending in enumerate(process_queue):
+            if pending.audio_id == uuid:
                 index = i
                 break
         return {"done": False, "status": f"Queued ({index} in queue before this one)"}
@@ -107,7 +124,8 @@ def process():
         time.sleep(0.1)
         with lock:
             if len(process_queue) > 0:
-                audio_id, fp = process_queue.pop(0)
+                pending = process_queue.pop(0)
+                audio_id = pending.audio_id
                 processing = audio_id
                 start_time = time.time()
             else:
@@ -115,7 +133,15 @@ def process():
 
         try:
             # Start transcription
-            output, elapsed = diarized_transcribe(fp, num_speakers=2, task="transcribe")
+            output, elapsed = diarized_transcribe(
+                pending.file,
+                language=pending.language,
+                diarize=pending.diarize,
+                min_speakers=pending.min_speakers,
+                max_speakers=pending.max_speakers,
+                initial_prompt=pending.initial_prompt,
+                task="transcribe",
+            )
 
             # Write to file
             write_json(DATA_DIR / "transcription" / f"{audio_id}.json", {

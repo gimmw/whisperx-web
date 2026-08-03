@@ -6,6 +6,116 @@
     let isUploading = false
     let error = ""
 
+    let enableDiarization = true
+    let minSpeakers: number | null = null
+    let maxSpeakers: number | null = null
+    let initialPrompt = ""
+    let language = "en"
+
+    const languages: [string, string][] = [
+        ["auto", "Autodetect"],
+        ["en", "English"],
+        ["zh", "Chinese"],
+        ["de", "German"],
+        ["es", "Spanish"],
+        ["ru", "Russian"],
+        ["ko", "Korean"],
+        ["fr", "French"],
+        ["ja", "Japanese"],
+        ["pt", "Portuguese"],
+        ["tr", "Turkish"],
+        ["pl", "Polish"],
+        ["ca", "Catalan"],
+        ["nl", "Dutch"],
+        ["ar", "Arabic"],
+        ["sv", "Swedish"],
+        ["it", "Italian"],
+        ["id", "Indonesian"],
+        ["hi", "Hindi"],
+        ["fi", "Finnish"],
+        ["vi", "Vietnamese"],
+        ["he", "Hebrew"],
+        ["uk", "Ukrainian"],
+        ["el", "Greek"],
+        ["ms", "Malay"],
+        ["cs", "Czech"],
+        ["ro", "Romanian"],
+        ["da", "Danish"],
+        ["hu", "Hungarian"],
+        ["ta", "Tamil"],
+        ["no", "Norwegian"],
+        ["th", "Thai"],
+        ["ur", "Urdu"],
+        ["hr", "Croatian"],
+        ["bg", "Bulgarian"],
+        ["lt", "Lithuanian"],
+        ["la", "Latin"],
+        ["mi", "Maori"],
+        ["ml", "Malayalam"],
+        ["cy", "Welsh"],
+        ["sk", "Slovak"],
+        ["te", "Telugu"],
+        ["fa", "Persian"],
+        ["lv", "Latvian"],
+        ["bn", "Bengali"],
+        ["sr", "Serbian"],
+        ["az", "Azerbaijani"],
+        ["sl", "Slovenian"],
+        ["kn", "Kannada"],
+        ["et", "Estonian"],
+        ["mk", "Macedonian"],
+        ["br", "Breton"],
+        ["eu", "Basque"],
+        ["is", "Icelandic"],
+        ["hy", "Armenian"],
+        ["ne", "Nepali"],
+        ["mn", "Mongolian"],
+        ["bs", "Bosnian"],
+        ["kk", "Kazakh"],
+        ["sq", "Albanian"],
+        ["sw", "Swahili"],
+        ["gl", "Galician"],
+        ["mr", "Marathi"],
+        ["pa", "Punjabi"],
+        ["si", "Sinhala"],
+        ["km", "Khmer"],
+        ["sn", "Shona"],
+        ["yo", "Yoruba"],
+        ["so", "Somali"],
+        ["af", "Afrikaans"],
+        ["oc", "Occitan"],
+        ["ka", "Georgian"],
+        ["be", "Belarusian"],
+        ["tg", "Tajik"],
+        ["sd", "Sindhi"],
+        ["gu", "Gujarati"],
+        ["am", "Amharic"],
+        ["yi", "Yiddish"],
+        ["lo", "Lao"],
+        ["uz", "Uzbek"],
+        ["fo", "Faroese"],
+        ["ht", "Haitian Creole"],
+        ["ps", "Pashto"],
+        ["tk", "Turkmen"],
+        ["nn", "Nynorsk"],
+        ["mt", "Maltese"],
+        ["sa", "Sanskrit"],
+        ["lb", "Luxembourgish"],
+        ["my", "Myanmar"],
+        ["bo", "Tibetan"],
+        ["tl", "Tagalog"],
+        ["mg", "Malagasy"],
+        ["as", "Assamese"],
+        ["tt", "Tatar"],
+        ["haw", "Hawaiian"],
+        ["ln", "Lingala"],
+        ["ha", "Hausa"],
+        ["ba", "Bashkir"],
+        ["jw", "Javanese"],
+        ["su", "Sundanese"],
+        ["yue", "Cantonese"],
+    ]
+
     function onDragOver(event: DragEvent) {
         event.preventDefault()
         isDragging = true
@@ -42,6 +152,14 @@
         // Upload file
         let formData = new FormData()
         formData.append('file', file)
+        formData.append('language', language)
+        formData.append('diarize', enableDiarization ? 'true' : 'false')
+        if (enableDiarization && minSpeakers != null)
+            formData.append('min_speakers', String(minSpeakers))
+        if (enableDiarization && maxSpeakers != null)
+            formData.append('max_speakers', String(maxSpeakers))
+        if (initialPrompt.trim())
+            formData.append('initial_prompt', initialPrompt.trim())
 
         const res = await fetch(`${HOST}/upload`, {
             method: 'POST',
@@ -74,8 +192,42 @@
         {:else if error}
             {error}
         {:else}
-            Drop file to upload
+            📥 drop file to transcribe
         {/if}
+    </div>
+
+    <div class="options">
+        <label class="option-label">
+            Language
+            <select bind:value={language}>
+                {#each languages as [code, name]}
+                    <option value={code}>{name}</option>
+                {/each}
+            </select>
+        </label>
+
+        <label class="toggle">
+            <input type="checkbox" bind:checked={enableDiarization} />
+            Speaker diarisation
+        </label>
+
+        {#if enableDiarization}
+            <div class="speaker-opts">
+                <label>
+                    Min speakers
+                    <input type="number" min="1" max="20" placeholder="auto" bind:value={minSpeakers} />
+                </label>
+                <label>
+                    Max speakers
+                    <input type="number" min="1" max="20" placeholder="auto" bind:value={maxSpeakers} />
+                </label>
+            </div>
+        {/if}
+
+        <label class="prompt-label">
+            Initial prompt
+            <input type="text" placeholder="Optional context to guide transcription" bind:value={initialPrompt} />
+        </label>
     </div>
 
     <div class="upload-btn">
@@ -117,6 +269,98 @@
   .drop-area.error
     border-color: $c-error
     color: $c-error
+
+  .options
+    position: fixed
+    bottom: 6rem
+    left: 50%
+    transform: translateX(-50%)
+    z-index: 110
+
+    display: flex
+    flex-direction: column
+    align-items: center
+    gap: 0.75rem
+
+    color: white
+    font-size: 0.9rem
+
+    .option-label
+      display: flex
+      flex-direction: column
+      align-items: center
+      gap: 0.25rem
+      font-size: 0.8rem
+
+      select
+        padding: 0.3rem 0.5rem
+        border: 1px solid rgba(white, 0.3)
+        border-radius: 0.4rem
+        background: rgba(white, 0.1)
+        color: white
+        font-size: 0.85rem
+        cursor: pointer
+
+        option
+          background: #242424
+          color: white
+
+    .toggle
+      display: flex
+      align-items: center
+      gap: 0.5rem
+      cursor: pointer
+
+      input[type="checkbox"]
+        width: 1.1rem
+        height: 1.1rem
+        cursor: pointer
+
+    .speaker-opts
+      display: flex
+      gap: 1.5rem
+
+      label
+        display: flex
+        flex-direction: column
+        align-items: center
+        gap: 0.25rem
+        font-size: 0.8rem
+
+      input[type="number"]
+        width: 5rem
+        padding: 0.3rem 0.5rem
+        border: 1px solid rgba(white, 0.3)
+        border-radius: 0.4rem
+        background: rgba(white, 0.1)
+        color: white
+        font-size: 0.85rem
+        text-align: center
+
+        &::placeholder
+          color: rgba(white, 0.4)
+
+    .prompt-label
+      display: flex
+      flex-direction: column
+      align-items: center
+      gap: 0.25rem
+      font-size: 0.8rem
+      width: 100%
+
+      input[type="text"]
+        width: 20rem
+        max-width: 90vw
+        padding: 0.3rem 0.5rem
+        border: 1px solid rgba(white, 0.3)
+        border-radius: 0.4rem
+        background: rgba(white, 0.1)
+        color: white
+        font-size: 0.85rem
+        text-align: center
+
+        &::placeholder
+          color: rgba(white, 0.4)
 
   .upload-btn
     position: fixed
