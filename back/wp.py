@@ -48,15 +48,18 @@ def diarized_transcribe(
     transcribe_elapsed = time.time() - t0
 
     # 2. Align (phoneme-level timestamps via wav2vec2)
-    align_model, align_meta = whisperx.load_align_model(language_code=lang, device=DEVICE)
-    result = whisperx.align(
-        result["segments"], align_model, align_meta, audio, device=DEVICE,
-    )
-
-    # Unload alignment model to free VRAM for diarization
-    del align_model
-    gc.collect()
-    torch.cuda.empty_cache()
+    #    Skip if no alignment model exists for the detected language —
+    #    segment-level timestamps from Whisper are still usable.
+    try:
+        align_model, align_meta = whisperx.load_align_model(language_code=lang, device=DEVICE)
+        result = whisperx.align(
+            result["segments"], align_model, align_meta, audio, device=DEVICE,
+        )
+        del align_model
+        gc.collect()
+        torch.cuda.empty_cache()
+    except ValueError:
+        print(f"No alignment model for language '{lang}', skipping alignment")
 
     # 3. Optionally diarize and assign speakers
     diarize_elapsed = 0.0
