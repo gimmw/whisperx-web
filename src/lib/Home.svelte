@@ -9,6 +9,7 @@
     let enableDiarization = true
     let minSpeakers: number | null = null
     let maxSpeakers: number | null = null
+    let initialPrompt = ""
 
     function onDragOver(event: DragEvent) {
         event.preventDefault()
@@ -51,6 +52,8 @@
             formData.append('min_speakers', String(minSpeakers))
         if (enableDiarization && maxSpeakers != null)
             formData.append('max_speakers', String(maxSpeakers))
+        if (initialPrompt.trim())
+            formData.append('initial_prompt', initialPrompt.trim())
 
         const res = await fetch(`${HOST}/upload`, {
             method: 'POST',
@@ -83,14 +86,14 @@
         {:else if error}
             {error}
         {:else}
-            Drop file to upload
+            📥 drop file to transcribe
         {/if}
     </div>
 
     <div class="options">
         <label class="toggle">
             <input type="checkbox" bind:checked={enableDiarization} />
-            Speaker diarization
+            Speaker diarisation
         </label>
 
         {#if enableDiarization}
@@ -105,6 +108,11 @@
                 </label>
             </div>
         {/if}
+
+        <label class="prompt-label">
+            Initial prompt
+            <input type="text" placeholder="Optional context to guide transcription" bind:value={initialPrompt} />
+        </label>
     </div>
 
     <div class="upload-btn">
@@ -186,6 +194,28 @@
 
       input[type="number"]
         width: 5rem
+        padding: 0.3rem 0.5rem
+        border: 1px solid rgba(white, 0.3)
+        border-radius: 0.4rem
+        background: rgba(white, 0.1)
+        color: white
+        font-size: 0.85rem
+        text-align: center
+
+        &::placeholder
+          color: rgba(white, 0.4)
+
+    .prompt-label
+      display: flex
+      flex-direction: column
+      align-items: center
+      gap: 0.25rem
+      font-size: 0.8rem
+      width: 100%
+
+      input[type="text"]
+        width: 20rem
+        max-width: 90vw
         padding: 0.3rem 0.5rem
         border: 1px solid rgba(white, 0.3)
         border-radius: 0.4rem

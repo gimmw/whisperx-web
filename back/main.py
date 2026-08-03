@@ -48,6 +48,7 @@ class PendingProcess(NamedTuple):
     diarize: bool = True
     min_speakers: int | None = None
     max_speakers: int | None = None
+    initial_prompt: str = ""
 
 
 @app.get('/health')
@@ -61,6 +62,7 @@ async def upload(
     diarize: str = Form("true"),
     min_speakers: str | None = Form(None),
     max_speakers: str | None = Form(None),
+    initial_prompt: str = Form(""),
 ):
     try:
         contents = await file.read()
@@ -82,7 +84,7 @@ async def upload(
 
         # Add to processing queue
         with lock:
-            process_queue.append(PendingProcess(audio_id, fp, do_diarize, min_spk, max_spk))
+            process_queue.append(PendingProcess(audio_id, fp, do_diarize, min_spk, max_spk, initial_prompt.strip()))
 
         return {"audio_id": audio_id}
 
@@ -134,6 +136,7 @@ def process():
                 diarize=pending.diarize,
                 min_speakers=pending.min_speakers,
                 max_speakers=pending.max_speakers,
+                initial_prompt=pending.initial_prompt,
                 task="transcribe",
             )
 

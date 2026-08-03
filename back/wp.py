@@ -18,7 +18,7 @@ wx_model = whisperx.load_model(
     device=DEVICE,
     compute_type=COMPUTE_TYPE,
     language=None,  # auto-detect
-    asr_options={"initial_prompt": "English and Mandarin Chinese mixed conversation."},
+    asr_options={"initial_prompt": None},
 )
 
 # Initialize diarization pipeline (pyannote-audio)
@@ -35,12 +35,14 @@ def diarized_transcribe(
     diarize: bool = True,
     min_speakers: int | None = None,
     max_speakers: int | None = None,
+    initial_prompt: str = "",
     task: str = "transcribe",
 ) -> tuple[dict, tuple[float, float]]:
     audio = whisperx.load_audio(str(fp))
 
     # 1. Transcribe (batched, VAD-preprocessed)
     t0 = time.time()
+    wx_model.options.initial_prompt = initial_prompt or None
     result = wx_model.transcribe(audio, batch_size=BATCH_SIZE, task=task)
     lang = result.get("language", "en")
     transcribe_elapsed = time.time() - t0
