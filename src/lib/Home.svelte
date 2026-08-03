@@ -6,6 +6,10 @@
     let isUploading = false
     let error = ""
 
+    let enableDiarization = true
+    let minSpeakers: number | null = null
+    let maxSpeakers: number | null = null
+
     function onDragOver(event: DragEvent) {
         event.preventDefault()
         isDragging = true
@@ -42,6 +46,11 @@
         // Upload file
         let formData = new FormData()
         formData.append('file', file)
+        formData.append('diarize', enableDiarization ? 'true' : 'false')
+        if (enableDiarization && minSpeakers != null)
+            formData.append('min_speakers', String(minSpeakers))
+        if (enableDiarization && maxSpeakers != null)
+            formData.append('max_speakers', String(maxSpeakers))
 
         const res = await fetch(`${HOST}/upload`, {
             method: 'POST',
@@ -75,6 +84,26 @@
             {error}
         {:else}
             Drop file to upload
+        {/if}
+    </div>
+
+    <div class="options">
+        <label class="toggle">
+            <input type="checkbox" bind:checked={enableDiarization} />
+            Speaker diarization
+        </label>
+
+        {#if enableDiarization}
+            <div class="speaker-opts">
+                <label>
+                    Min speakers
+                    <input type="number" min="1" max="20" placeholder="auto" bind:value={minSpeakers} />
+                </label>
+                <label>
+                    Max speakers
+                    <input type="number" min="1" max="20" placeholder="auto" bind:value={maxSpeakers} />
+                </label>
+            </div>
         {/if}
     </div>
 
@@ -117,6 +146,56 @@
   .drop-area.error
     border-color: $c-error
     color: $c-error
+
+  .options
+    position: fixed
+    bottom: 6rem
+    left: 50%
+    transform: translateX(-50%)
+    z-index: 110
+
+    display: flex
+    flex-direction: column
+    align-items: center
+    gap: 0.75rem
+
+    color: white
+    font-size: 0.9rem
+
+    .toggle
+      display: flex
+      align-items: center
+      gap: 0.5rem
+      cursor: pointer
+
+      input[type="checkbox"]
+        width: 1.1rem
+        height: 1.1rem
+        cursor: pointer
+
+    .speaker-opts
+      display: flex
+      gap: 1.5rem
+
+      label
+        display: flex
+        flex-direction: column
+        align-items: center
+        gap: 0.25rem
+        font-size: 0.8rem
+
+      input[type="number"]
+        width: 5rem
+        padding: 0.3rem 0.5rem
+        border: 1px solid rgba(white, 0.3)
+        border-radius: 0.4rem
+        background: rgba(white, 0.1)
+        color: white
+        font-size: 0.85rem
+        text-align: center
+
+        &::placeholder
+          color: rgba(white, 0.4)
 
   .upload-btn
     position: fixed

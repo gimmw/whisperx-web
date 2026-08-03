@@ -30,7 +30,13 @@ diarize_pipe = DiarizationPipeline(
 print("Loaded")
 
 
-def diarized_transcribe(fp: str | Path, num_speakers: int, task="transcribe") -> tuple[dict, tuple[float, float]]:
+def diarized_transcribe(
+    fp: str | Path,
+    diarize: bool = True,
+    min_speakers: int | None = None,
+    max_speakers: int | None = None,
+    task: str = "transcribe",
+) -> tuple[dict, tuple[float, float]]:
     audio = whisperx.load_audio(str(fp))
 
     # 1. Transcribe (batched, VAD-preprocessed)
@@ -50,11 +56,17 @@ def diarized_transcribe(fp: str | Path, num_speakers: int, task="transcribe") ->
     gc.collect()
     torch.cuda.empty_cache()
 
-    # 3. Diarize and assign speakers
-    t1 = time.time()
-    diarize_segments = diarize_pipe(audio, num_speakers=num_speakers)
-    result = whisperx.assign_word_speakers(diarize_segments, result)
-    diarize_elapsed = time.time() - t1
+    # 3. Optionally diarize and assign speakers
+    diarize_elapsed = 0.0
+    if diarize:
+        t1 = time.time()
+        diarize_segments = diarize_pipe(
+            audio,
+            min_speakers=min_speakers,
+            max_speakers=max_speakers,
+        )
+        result = whisperx.assign_word_speakers(diarize_segments, result)
+        diarize_elapsed = time.time() - t1
 
     gc.collect()
     torch.cuda.empty_cache()
@@ -81,4 +93,4 @@ if __name__ == "__main__":
     # Test
     import sys
     if len(sys.argv) > 1:
-        print(diarized_transcribe(sys.argv[1], num_speakers=2))
+        print(diarized_transcribe(sys.argv[1]))
