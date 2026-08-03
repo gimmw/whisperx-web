@@ -1,5 +1,5 @@
-# Use NVIDIA CUDA runtime as base
-FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
+# Use NVIDIA CUDA runtime as base (WhisperX requires CUDA 12.8+)
+FROM nvidia/cuda:12.8.1-runtime-ubuntu22.04
 
 # Prevent interactive prompts during package installation
 ENV DEBIAN_FRONTEND=noninteractive
