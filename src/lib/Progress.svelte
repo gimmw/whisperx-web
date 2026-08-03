@@ -9,6 +9,12 @@
         speaker?: string
     }
 
+    interface SpeakerBlock {
+        speaker: string | null,
+        startTime: number,
+        chunks: Chunk[]
+    }
+
     export let id: string;
     let progress = '';
     let isDone = false;
@@ -20,7 +26,31 @@
         elapsed: number[]
         elapsedStr: string
     }
+    let blocks: SpeakerBlock[] = [];
+    let hasSpeakers = false;
     let optTimestamps = localStorage.getItem('optTimestamps') === 'true';
+
+    function groupChunks(chunks: Chunk[]): SpeakerBlock[] {
+        const groups: SpeakerBlock[] = [];
+        for (const chunk of chunks) {
+            const speaker = chunk.speaker ?? null;
+            const last = groups[groups.length - 1];
+            if (last && last.speaker === speaker) {
+                last.chunks.push(chunk);
+            } else {
+                groups.push({
+                    speaker,
+                    startTime: chunk.timestamp[0],
+                    chunks: [chunk],
+                });
+            }
+        }
+        return groups;
+    }
+
+    function blockText(block: SpeakerBlock): string {
+        return block.chunks.map(c => c.text.trim()).filter(t => t).join(" ");
+    }
 
     onMount(() => {
         checkProgress();
@@ -41,6 +71,8 @@
             for (const chunk of result.output.chunks)
                 chunk.speaker = chunk.speaker?.replace("SPEAKER_0", "")
 
+            hasSpeakers = result.output.chunks.some(c => c.speaker != null);
+            blocks = groupChunks(result.output.chunks);
             console.log(result)
             await downloadResults();
         } else {
@@ -50,27 +82,26 @@
     }
 
     async function downloadResults() {
-        // Write to timestamped text file
-        const output = result.output;
         let txt = "";
-        let lastSpeaker = "";
 
-        output.chunks.forEach(c => {
-            let _start = c.timestamp[0];
-            let speaker = c.speaker ?? "?";
+        for (const block of blocks) {
+            let blockStart = new Date(block.startTime * 1000).toISOString().substring(11, 19);
 
-            // Convert seconds to 00:00:00 format
-            let start = new Date(_start * 1000).toISOString().substring(11, 19);
-            if (speaker !== lastSpeaker) {
-                txt += `\n[Speaker ${speaker}]\n`;
-                lastSpeaker = speaker;
-            }
-            if (optTimestamps) {
-                txt += `${start}: ${c.text}\n`;
+            if (hasSpeakers) {
+                txt += `\n[Speaker ${block.speaker} - ${blockStart}]\n`;
             } else {
-                txt += `${c.text}\n`;
+                txt += "\n";
             }
-        });
+
+            if (optTimestamps) {
+                for (const c of block.chunks) {
+                    let start = new Date(c.timestamp[0] * 1000).toISOString().substring(11, 19);
+                    txt += `${start}: ${c.text.trim()}\n`;
+                }
+            } else {
+                txt += blockText(block) + "\n";
+            }
+        }
 
         download(txt, `${id}.txt`, 'text/plain');
     }
@@ -98,12 +129,16 @@
             Download with timestamps
         </label>
         
-        <div class="chunks">
-            {#each result.output.chunks as chunk}
-                <div>
-                    <span>{moment.utc(chunk.timestamp[0] * 1000).format("HH:mm:ss")}</span>
-                    <span class="speaker s{chunk.speaker}">{chunk.speaker ?? "?"}</span>
-                    <p>{chunk.text}</p>
+        <div class="blocks">
+            {#each blocks as block}
+                <div class="block">
+                    <div class="block-header">
+                        {#if hasSpeakers}
+                            <span class="speaker s{block.speaker}">{block.speaker}</span>
+                        {/if}
+                        <span class="time">{moment.utc(block.startTime * 1000).format("HH:mm:ss")}</span>
+                    </div>
+                    <p class="block-text">{blockText(block)}</p>
                 </div>
             {/each}
         </div>
@@ -113,21 +148,33 @@
 </main>
 
 <style lang="sass">
-    .chunks
-      div
-        display: flex
-        align-items: center
-        gap: 1rem
+    .blocks
+      display: flex
+      flex-direction: column
+      gap: 1.25rem
+      text-align: left
 
-        text-align: left
+      .block
+        .block-header
+          display: flex
+          align-items: center
+          gap: 0.75rem
+          margin-bottom: 0.25rem
 
-        > span
-          font-family: monospace
+          .speaker
+            font-weight: bold
+            color: #ff9595
+          .s0
+            color: #59ffa1
+          .s1
+            color: #597aff
 
-        .speaker
-          color: #ff9595
-        .s0
-          color: #59ffa1
-        .s1
-          color: #597aff
+          .time
+            font-family: monospace
+            font-size: 0.85em
+            opacity: 0.6
+
+        .block-text
+          margin: 0
+          line-height: 1.5
 </style>
