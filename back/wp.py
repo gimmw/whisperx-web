@@ -32,6 +32,7 @@ print("Loaded")
 
 def diarized_transcribe(
     fp: str | Path,
+    language: str = "en",
     diarize: bool = True,
     min_speakers: int | None = None,
     max_speakers: int | None = None,
@@ -43,8 +44,9 @@ def diarized_transcribe(
     # 1. Transcribe (batched, VAD-preprocessed)
     t0 = time.time()
     wx_model.options.initial_prompt = initial_prompt or None
-    result = wx_model.transcribe(audio, batch_size=BATCH_SIZE, task=task)
-    lang = result.get("language", "en")
+    lang_arg = None if language == "auto" else language
+    result = wx_model.transcribe(audio, batch_size=BATCH_SIZE, task=task, language=lang_arg)
+    lang = result.get("language", language if language != "auto" else "en")
     transcribe_elapsed = time.time() - t0
 
     # 2. Align (phoneme-level timestamps via wav2vec2)

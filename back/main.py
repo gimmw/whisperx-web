@@ -45,6 +45,7 @@ app.mount("/result", StaticFiles(directory=DATA_DIR / "transcription"), name="re
 class PendingProcess(NamedTuple):
     audio_id: str
     file: Path
+    language: str = "en"
     diarize: bool = True
     min_speakers: int | None = None
     max_speakers: int | None = None
@@ -59,6 +60,7 @@ def health():
 @app.post("/upload")
 async def upload(
     file: UploadFile = File(...),
+    language: str = Form("en"),
     diarize: str = Form("true"),
     min_speakers: str | None = Form(None),
     max_speakers: str | None = Form(None),
@@ -84,7 +86,7 @@ async def upload(
 
         # Add to processing queue
         with lock:
-            process_queue.append(PendingProcess(audio_id, fp, do_diarize, min_spk, max_spk, initial_prompt.strip()))
+            process_queue.append(PendingProcess(audio_id, fp, language, do_diarize, min_spk, max_spk, initial_prompt.strip()))
 
         return {"audio_id": audio_id}
 
@@ -133,6 +135,7 @@ def process():
             # Start transcription
             output, elapsed = diarized_transcribe(
                 pending.file,
+                language=pending.language,
                 diarize=pending.diarize,
                 min_speakers=pending.min_speakers,
                 max_speakers=pending.max_speakers,
