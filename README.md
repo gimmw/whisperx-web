@@ -18,6 +18,8 @@ This service does not use accounts or passwords. Each uploaded file is assigned 
 
 There is no way for other users to browse, list, or guess another user's files under normal circumstances, and the original audio file is never exposed for download; only the transcript is. 
 
+Uploads are processed one at a time in a first-in, first-out queue — If you upload while another job is running, your file waits its turn, and the progress page shows your position in the queue along with live CPU/GPU usage once your file starts processing. 
+
 
 ## Deployment Instructions
 
