@@ -12,6 +12,13 @@ Fork of [one-among-us/whisper-web](https://github.com/one-among-us/whisper-web) 
 * Speaker diarisation
 
 
+## Multi-user model
+
+This service does not use accounts or passwords. Each uploaded file is assigned a random, unguessable link (UUID) that is used to check progress and download the transcript — Anyone who has that link can access the results, so it should be treated like a private URL and not shared. 
+
+There is no way for other users to browse, list, or guess another user's files under normal circumstances, and the original audio file is never exposed for download; only the transcript is. 
+
+
 ## Deployment Instructions
 
 TODO 
