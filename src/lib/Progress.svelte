@@ -1,7 +1,19 @@
 <script lang="ts">
-    import { onMount } from 'svelte';
+    import { onMount, onDestroy } from 'svelte';
     import {HOST} from "./config";
     import moment from 'moment';
+
+    interface Metrics {
+        cpu_cores_used: number | null,
+        cpu_limit_cores: number | null,
+        cpu_util: number | null,
+        gpu_util: number | null,
+        gpu_mem_util: number | null,
+        gpu_mem_used_mb: number | null,
+        gpu_mem_total_mb: number | null,
+        gpu_temp_c: number | null,
+        gpu_name: string | null,
+    }
 
     interface Chunk {
         timestamp: [number, number],
@@ -18,6 +30,13 @@
     export let id: string;
     let progress = '';
     let isDone = false;
+    let state: 'queued' | 'processing' | 'error' | '' = '';
+    let queuePosition = 0;
+    let elapsed = 0;
+    let metrics: Metrics | null = null;
+    let pollError = '';
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let cancelled = false;
     let result: {
         output: {
             text: string
@@ -56,9 +75,31 @@
         checkProgress();
     });
 
+    onDestroy(() => {
+        cancelled = true;
+        if (timer !== null) clearTimeout(timer);
+    });
+
+    function pct(v: number | null | undefined): string {
+        return v == null ? '--' : `${Math.round(v * 100)}%`;
+    }
+
     async function checkProgress() {
-        const response = await fetch(`${HOST}/progress/${id}`);
-        const data = await response.json();
+        if (cancelled) return;
+
+        let data: any;
+        try {
+            const response = await fetch(`${HOST}/progress/${id}`);
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            data = await response.json();
+            pollError = '';
+        } catch (e) {
+            // Keep polling instead of silently dying on a transient failure
+            // (pod restart, rollout, brief network blip).
+            pollError = e instanceof Error ? e.message : String(e);
+            if (!cancelled) timer = setTimeout(checkProgress, 2000);
+            return;
+        }
 
         if (data.done) {
             isDone = true;
@@ -76,8 +117,12 @@
             console.log(result)
             await downloadResults();
         } else {
-            progress = data.status;
-            setTimeout(checkProgress, 1000); // Check progress regularly
+            state = data.state ?? '';
+            queuePosition = data.queue_position ?? 0;
+            elapsed = data.elapsed ?? 0;
+            metrics = data.metrics ?? null;
+            progress = data.status ?? '';
+            if (!cancelled) timer = setTimeout(checkProgress, 1000);
         }
     }
 
@@ -142,12 +187,99 @@
                 </div>
             {/each}
         </div>
-    {:else}
+    {:else if state === 'error'}
         <p>Progress: {progress}</p>
+    {:else if state === 'processing'}
+        <p class="status-line">Processing &middot; {Math.round(elapsed)}s elapsed</p>
+
+        <div class="metrics">
+            <div class="metric">
+                <span class="metric-label">CPU</span>
+                {#if metrics?.cpu_cores_used != null}
+                    <span class="metric-value">{metrics.cpu_cores_used.toFixed(2)} cores</span>
+                    {#if metrics.cpu_limit_cores}
+                        <span class="metric-sub">
+                            of {metrics.cpu_limit_cores.toFixed(2)} ({pct(metrics.cpu_util)})
+                        </span>
+                    {/if}
+                {:else}
+                    <span class="metric-value unavailable">unavailable</span>
+                {/if}
+            </div>
+
+            <div class="metric">
+                <span class="metric-label">GPU</span>
+                {#if metrics?.gpu_util != null}
+                    <span class="metric-value">{pct(metrics.gpu_util)}</span>
+                {:else}
+                    <span class="metric-value unavailable">unavailable</span>
+                {/if}
+                {#if metrics?.gpu_mem_used_mb != null && metrics?.gpu_mem_total_mb != null}
+                    <span class="metric-sub">
+                        {(metrics.gpu_mem_used_mb / 1024).toFixed(1)} /
+                        {(metrics.gpu_mem_total_mb / 1024).toFixed(1)} GiB VRAM
+                    </span>
+                {/if}
+            </div>
+        </div>
+
+        {#if pollError}
+            <p class="poll-error">Connection issue &mdash; retrying ({pollError})</p>
+        {/if}
+    {:else}
+        <p class="status-line">
+            {#if state === 'queued'}
+                Queued &middot; {queuePosition} ahead of you
+            {:else}
+                {progress || 'Loading...'}
+            {/if}
+        </p>
+        {#if pollError}
+            <p class="poll-error">Connection issue &mdash; retrying ({pollError})</p>
+        {/if}
     {/if}
 </main>
 
 <style lang="sass">
+    .status-line
+      opacity: 0.85
+
+    .metrics
+      display: flex
+      justify-content: center
+      gap: 2.5rem
+      margin: 1rem 0
+
+      .metric
+        display: flex
+        flex-direction: column
+        align-items: center
+        gap: 0.15rem
+
+        .metric-label
+          font-size: 0.75em
+          text-transform: uppercase
+          letter-spacing: 0.08em
+          opacity: 0.5
+
+        .metric-value
+          font-family: monospace
+          font-size: 1.1em
+
+          &.unavailable
+            opacity: 0.4
+            font-size: 0.9em
+
+        .metric-sub
+          font-family: monospace
+          font-size: 0.75em
+          opacity: 0.5
+
+    .poll-error
+      font-size: 0.85em
+      color: #ff9595
+      opacity: 0.8
+
     .blocks
       display: flex
       flex-direction: column

@@ -1,4 +1,3 @@
-import os
 import threading
 import time
 import traceback
@@ -8,13 +7,13 @@ import uuid
 from pathlib import Path
 from typing import NamedTuple
 
-import GPUtil
 import uvicorn
 from fastapi import FastAPI, Form, UploadFile, File
 from hypy_utils import write, write_json
 from starlette.middleware.cors import CORSMiddleware
 from starlette.staticfiles import StaticFiles
 
+import metrics
 from wp import diarized_transcribe
 
 app = FastAPI()
@@ -95,27 +94,52 @@ async def upload(
 
 
 @app.get("/progress/{uuid}")
-async def progress(uuid: str):
+def progress(uuid: str):
     if Path(DATA_DIR / "transcription" / f"{uuid}.json").exists():
         return {"done": True}
 
-    if processing == uuid:
-        # Get load avg, and nvidia load
-        lavg = float(open("/proc/loadavg").read().strip().split()[0])
-        num_cpus = os.cpu_count()
-        nvidia = GPUtil.getGPUs()[0].load
-        elapsed = time.time() - start_time
+    with lock:
+        current, started_at = processing, start_time
 
-        return {"done": False, "status": f"Processing ({lavg / num_cpus * 100:.0f}% CPU, {nvidia * 100:.0f}% GPU, {elapsed:.0f}s elapsed)"}
+    if current == uuid:
+        # Metrics are returned as structured numbers rather than a pre-rendered
+        # string so the client can format/visualise them, and so that a missing
+        # value is representable as null instead of a fabricated zero.
+        m = metrics.collect()
+        elapsed = time.time() - started_at
+        return {
+            "done": False,
+            "state": "processing",
+            "elapsed": elapsed,
+            "metrics": m,
+            # Human-readable fallback for older clients.
+            "status": _status_line(m, elapsed),
+        }
     elif uuid in errors:
-        return {"done": False, "status": "Error", "error": errors[uuid]}
+        return {"done": False, "state": "error", "status": "Error", "error": errors[uuid]}
     else:
         index = 0
-        for i, pending in enumerate(process_queue):
-            if pending.audio_id == uuid:
-                index = i
-                break
-        return {"done": False, "status": f"Queued ({index} in queue before this one)"}
+        with lock:
+            for i, pending in enumerate(process_queue):
+                if pending.audio_id == uuid:
+                    index = i
+                    break
+        return {
+            "done": False,
+            "state": "queued",
+            "queue_position": index,
+            "status": f"Queued ({index} in queue before this one)",
+        }
+
+
+def _status_line(m: dict, elapsed: float) -> str:
+    parts = []
+    if m.get("cpu_cores_used") is not None:
+        parts.append(f"{m['cpu_cores_used']:.2f} CPU cores")
+    if m.get("gpu_util") is not None:
+        parts.append(f"{m['gpu_util'] * 100:.0f}% GPU")
+    parts.append(f"{elapsed:.0f}s elapsed")
+    return f"Processing ({', '.join(parts)})"
 
 
 def process():
@@ -160,6 +184,7 @@ def process():
 
 
 if __name__ == '__main__':
+    metrics.start_sampler()
     threading.Thread(target=process, daemon=True).start()
     uvicorn.run(app, host="0.0.0.0", port=49585)
     print("Server started")
