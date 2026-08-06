@@ -21,6 +21,13 @@ services:
       - CORS_ORIGINS=${CORS_ORIGINS:-*}
       # Maximum accepted upload size in MB.
       - MAX_UPLOAD_MB=${MAX_UPLOAD_MB:-512}
+      # Total jobs queued or running at once. The worker is serial, so this
+      # multiplied by the median job time is roughly the worst-case wait.
+      - MAX_QUEUE_DEPTH=${MAX_QUEUE_DEPTH:-10}
+      # Jobs one client may have queued or running at once. Clients are
+      # identified by the X-Real-IP the frontend proxy sets, which is only
+      # trustworthy while this service stays unpublished (see above).
+      - MAX_JOBS_PER_CLIENT=${MAX_JOBS_PER_CLIENT:-2}
       # You can also set CUDA_VISIBLE_DEVICES if needed
     volumes:
       - whisper-data:/ws/tmp-whisper

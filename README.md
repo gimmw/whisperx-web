@@ -20,6 +20,18 @@ There is no way for other users to browse, list, or guess another user's files u
 
 Uploads are processed one at a time in a first-in, first-out queue — If you upload while another job is running, your file waits its turn, and the progress page shows your position in the queue along with live CPU/GPU usage once your file starts processing. 
 
+Two limits keep one user from monopolising that queue. The whole service accepts
+`MAX_QUEUE_DEPTH` jobs at once (uploads beyond that are refused until a slot
+frees), and any single user may have `MAX_JOBS_PER_CLIENT` jobs queued or
+running at once. Both are refused at upload time with an explanatory message,
+and both clear themselves as jobs finish — there is no lasting penalty.
+
+Because the worker is serial, the worst-case wait is roughly `MAX_QUEUE_DEPTH`
+multiplied by your median job duration. Measure that before raising the default:
+a deep queue does not increase throughput, it only makes the last person in line
+wait longer. Users are identified by IP for the per-user limit, so people behind
+a shared NAT share a quota.
+
 
 ## Deployment
 
@@ -36,6 +48,11 @@ Two containers: a frontend (nginx serving the built SPA) and a backend (FastAPI
 * The backend needs `nvidia.com/gpu` in its resource limits and writable storage
   at `/ws/tmp-whisper` — use a PVC, since results are lost on pod restart
   otherwise. Uploads are processed one at a time, so run a single replica.
+* `MAX_JOBS_PER_CLIENT` identifies users by the `X-Real-IP` header the proxy
+  sets. Keep the backend reachable only through that proxy: if it is exposed
+  directly, clients can set the header themselves and bypass the limit. The
+  queue state is in-memory and per-pod, so both limits assume the single replica
+  above and reset on restart.
 
 
 ### Environment variables
@@ -53,6 +70,10 @@ Backend:
 * `CORS_ORIGINS` - comma-separated list of browser origins allowed to call the
   API, e.g. `https://whisper.internal.example`. Defaults to `*`. Not needed in
   the default same-origin setup (/api) above.
+* `MAX_QUEUE_DEPTH` - total jobs queued or running at once, across all users
+  (default `10`). Further uploads are refused with `503` until a slot frees.
+* `MAX_JOBS_PER_CLIENT` - jobs a single user may have queued or running at once
+  (default `2`). Further uploads are refused with `429` until one finishes.
 
 
 ## LLM Disclosure 🤖🧠

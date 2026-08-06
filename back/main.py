@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 import uvicorn
-from fastapi import FastAPI, Form, UploadFile, File
+from fastapi import FastAPI, Form, Request, UploadFile, File
 from hypy_utils import write_json
 from starlette.middleware.cors import CORSMiddleware
 from starlette.responses import JSONResponse
@@ -65,6 +65,22 @@ MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_MB", "512")) * 1024 * 1024
 # Size of each chunk read from the request stream during upload.
 UPLOAD_CHUNK_BYTES = 1024 * 1024
 
+# Maximum number of jobs waiting or running at once, across all clients.
+#
+# The worker is strictly serial (one GPU, one thread), so the worst-case wait
+# for the last person in line is roughly this many jobs times the median job
+# duration. Raising it does not increase throughput -- it only lengthens that
+# wait while consuming more disk, so keep it small enough that a full queue is
+# still worth waiting in.
+MAX_QUEUE_DEPTH = int(os.getenv("MAX_QUEUE_DEPTH", "10"))
+
+# Maximum jobs a single client may have queued or processing at once.
+#
+# This is a fairness control rather than a rate limit: it bounds the contended
+# resource (GPU time) directly, and it clears itself as jobs finish, so there
+# is no time window to track and no penalty that outlives the work.
+MAX_JOBS_PER_CLIENT = int(os.getenv("MAX_JOBS_PER_CLIENT", "2"))
+
 # Extensions accepted for upload. The uploaded name is attacker-controlled and
 # is used to build a filesystem path, so only these exact values are ever
 # interpolated — never the raw client string.
@@ -97,10 +113,50 @@ def _safe_extension(filename: str | None) -> str | None:
     return ext if ext in ALLOWED_EXTENSIONS else None
 
 
+def _client_key(request: Request) -> str:
+    """Identify the caller for per-client quota purposes.
+
+    request.client.host is NOT usable directly: in the normal deployment the
+    only peer this process ever sees is the nginx container, so every user
+    would collapse into a single key and one person's uploads would quota out
+    everyone. uvicorn only honours forwarding headers from
+    `forwarded_allow_ips` (default 127.0.0.1), which the proxy -- a separate
+    container -- is not, so its own de-proxying does not apply either.
+
+    nginx sets X-Real-IP with proxy_set_header (see front/nginx.conf), which
+    *replaces* rather than appends, so a client cannot forge it through the
+    proxy. X-Forwarded-For is deliberately not used: it is a client-extendable
+    list where only the rightmost entry is trustworthy.
+
+    This holds only while the backend is unreachable except through the proxy
+    -- which is why compose.yaml publishes no ports for it. If the backend is
+    ever exposed directly, this header becomes attacker-controlled and this
+    quota turns into a trivially bypassed one.
+    """
+    forwarded = (request.headers.get("x-real-ip") or "").strip()
+    if forwarded:
+        return forwarded
+    return request.client.host if request.client else "unknown"
+
+
 process_queue = []
 processing = ""
+processing_client = ""
 start_time = 0
 lock = threading.Lock()
+
+# Slots claimed by uploads that are still streaming to disk and have not yet
+# reached the queue.
+#
+# Without this, the capacity check and the queue append are separate operations
+# with a long upload in between, so N concurrent uploads all observe a queue
+# below the cap and all proceed -- admitting N jobs past a cap of 1. Reserving
+# up front closes that window: the slot is counted from the moment the request
+# is admitted, not from the moment it finishes uploading.
+#
+# Keyed by client, and the per-client counts are derived from the union of
+# these and the jobs actually in the system.
+reserved: dict[str, int] = {}
 
 # Set of audio_ids whose processing failed. Only membership is tracked, never
 # the exception detail: this is served to unauthenticated clients, and a
@@ -125,6 +181,72 @@ class PendingProcess(NamedTuple):
     min_speakers: int | None = None
     max_speakers: int | None = None
     initial_prompt: str = ""
+    client: str = ""
+
+
+def _total_jobs() -> int:
+    """Jobs occupying capacity: queued, uploading, and the one processing.
+
+    Caller must hold `lock`.
+    """
+    return len(process_queue) + sum(reserved.values()) + (1 if processing else 0)
+
+
+def _owned_by(client: str) -> int:
+    """Jobs belonging to `client` in any of those three states.
+
+    Caller must hold `lock`.
+    """
+    queued = sum(1 for p in process_queue if p.client == client)
+    running = 1 if processing and processing_client == client else 0
+    return queued + reserved.get(client, 0) + running
+
+
+def _try_reserve(client: str) -> str | None:
+    """Claim a capacity slot for `client`.
+
+    Returns None on success, or a short reason ("busy" / "per_client") on
+    refusal. Both the check and the claim happen under one lock acquisition so
+    concurrent uploads cannot both pass a check that only one should.
+    """
+    with lock:
+        if _total_jobs() >= MAX_QUEUE_DEPTH:
+            return "busy"
+        if _owned_by(client) >= MAX_JOBS_PER_CLIENT:
+            return "per_client"
+        reserved[client] = reserved.get(client, 0) + 1
+        return None
+
+
+def _drop_reservation_locked(client: str) -> None:
+    """Decrement a client's reservation count. Caller must hold `lock`.
+
+    Entries are deleted at zero rather than left at 0, so `reserved` does not
+    accumulate one key per client IP ever seen.
+    """
+    remaining = reserved.get(client, 0) - 1
+    if remaining > 0:
+        reserved[client] = remaining
+    else:
+        reserved.pop(client, None)
+
+
+def _release_reservation(client: str) -> None:
+    """Drop a slot claimed by _try_reserve, for uploads that never queued."""
+    with lock:
+        _drop_reservation_locked(client)
+
+
+def _commit_reservation(pending: PendingProcess) -> None:
+    """Turn a reservation into a real queue entry.
+
+    Done under a single lock acquisition: releasing first and appending after
+    would briefly drop the client below their quota, letting a concurrent
+    request slip in and overshoot the cap.
+    """
+    with lock:
+        _drop_reservation_locked(pending.client)
+        process_queue.append(pending)
 
 
 @app.get('/health')
@@ -134,6 +256,7 @@ def health():
 
 @app.post("/upload")
 async def upload(
+    request: Request,
     file: UploadFile = File(...),
     language: str = Form("en"),
     diarize: str = Form("true"),
@@ -162,54 +285,91 @@ async def upload(
             content={"error": "min_speakers and max_speakers must be integers"},
         )
 
-    time_str = time.strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{time_str}] Received {file.filename!r} ({ext})")
+    # Claim a capacity slot before reading the body. Checking after the upload
+    # would mean a rejected request had already cost a full MAX_UPLOAD_MB of
+    # bandwidth and disk -- which is exactly the resource the cap exists to
+    # protect.
+    client = _client_key(request)
+    refusal = _try_reserve(client)
+    if refusal == "busy":
+        return JSONResponse(
+            status_code=503,
+            content={"error": "The server is at capacity. Please try again in a few minutes."},
+            # Advisory only, but lets well-behaved clients back off sensibly
+            # instead of retrying immediately.
+            headers={"Retry-After": "120"},
+        )
+    if refusal == "per_client":
+        return JSONResponse(
+            status_code=429,
+            content={
+                "error": f"You already have {MAX_JOBS_PER_CLIENT} transcriptions in progress. "
+                         "Please wait for one to finish before uploading another."
+            },
+        )
 
-    audio_id = str(uuid.uuid4())
-    fp = DATA_DIR / "audio" / f"{audio_id}.{ext}"
-    fp.parent.mkdir(parents=True, exist_ok=True)
-
-    # Stream to disk in chunks rather than file.read(), which would buffer the
-    # entire upload in memory. The running total is checked as we go so an
-    # oversized body is rejected without ever being fully received or stored.
-    written = 0
+    # From here the slot is held, so every exit must either commit it (the job
+    # entered the queue and now occupies capacity in its own right) or release
+    # it. The finally below covers the paths that did neither -- including a
+    # client that disconnects mid-upload, which raises out of file.read() and
+    # would otherwise strand the slot until restart.
+    committed = False
     try:
-        with open(fp, "wb") as out:
-            while chunk := await file.read(UPLOAD_CHUNK_BYTES):
-                written += len(chunk)
-                if written > MAX_UPLOAD_BYTES:
-                    raise ValueError("too large")
-                out.write(chunk)
-    except ValueError:
-        fp.unlink(missing_ok=True)
-        limit_mb = MAX_UPLOAD_BYTES // (1024 * 1024)
-        return JSONResponse(
-            status_code=413,
-            content={"error": f"File too large. Maximum upload size is {limit_mb} MB."},
-        )
-    except Exception:
-        fp.unlink(missing_ok=True)
-        # Log the detail, return none of it: this path catches arbitrary
-        # exceptions (disk full, permission denied) whose messages embed
-        # absolute paths and other internals.
-        print(f"Error saving upload {audio_id}:")
-        traceback.print_exc()
-        return JSONResponse(
-            status_code=500,
-            content={"error": "Could not save the uploaded file. Please try again."},
-        )
+        time_str = time.strftime("%Y-%m-%d %H:%M:%S")
+        print(f"[{time_str}] Received {file.filename!r} ({ext})")
 
-    if written == 0:
-        fp.unlink(missing_ok=True)
-        return JSONResponse(status_code=400, content={"error": "Uploaded file is empty"})
+        audio_id = str(uuid.uuid4())
+        fp = DATA_DIR / "audio" / f"{audio_id}.{ext}"
+        fp.parent.mkdir(parents=True, exist_ok=True)
 
-    do_diarize = diarize.lower() == "true"
+        # Stream to disk in chunks rather than file.read(), which would buffer
+        # the entire upload in memory. The running total is checked as we go so
+        # an oversized body is rejected without ever being fully received or
+        # stored.
+        written = 0
+        try:
+            with open(fp, "wb") as out:
+                while chunk := await file.read(UPLOAD_CHUNK_BYTES):
+                    written += len(chunk)
+                    if written > MAX_UPLOAD_BYTES:
+                        raise ValueError("too large")
+                    out.write(chunk)
+        except ValueError:
+            fp.unlink(missing_ok=True)
+            limit_mb = MAX_UPLOAD_BYTES // (1024 * 1024)
+            return JSONResponse(
+                status_code=413,
+                content={"error": f"File too large. Maximum upload size is {limit_mb} MB."},
+            )
+        except Exception:
+            fp.unlink(missing_ok=True)
+            # Log the detail, return none of it: this path catches arbitrary
+            # exceptions (disk full, permission denied) whose messages embed
+            # absolute paths and other internals.
+            print(f"Error saving upload {audio_id}:")
+            traceback.print_exc()
+            return JSONResponse(
+                status_code=500,
+                content={"error": "Could not save the uploaded file. Please try again."},
+            )
 
-    # Add to processing queue
-    with lock:
-        process_queue.append(PendingProcess(audio_id, fp, language, do_diarize, min_spk, max_spk, initial_prompt.strip()))
+        if written == 0:
+            fp.unlink(missing_ok=True)
+            return JSONResponse(status_code=400, content={"error": "Uploaded file is empty"})
 
-    return {"audio_id": audio_id}
+        do_diarize = diarize.lower() == "true"
+
+        # Hand the reservation over to the queue entry in one step.
+        _commit_reservation(PendingProcess(
+            audio_id, fp, language, do_diarize, min_spk, max_spk,
+            initial_prompt.strip(), client,
+        ))
+        committed = True
+
+        return {"audio_id": audio_id}
+    finally:
+        if not committed:
+            _release_reservation(client)
 
 
 @app.get("/progress/{uuid}")
@@ -264,7 +424,7 @@ def _status_line(m: dict, elapsed: float) -> str:
 
 
 def process():
-    global processing, start_time
+    global processing, processing_client, start_time
     while True:
         time.sleep(0.1)
         with lock:
@@ -272,6 +432,10 @@ def process():
                 pending = process_queue.pop(0)
                 audio_id = pending.audio_id
                 processing = audio_id
+                # Tracked so the running job still counts against its owner's
+                # quota; without this a client could queue another the instant
+                # theirs left the queue and started processing.
+                processing_client = pending.client
                 start_time = time.time()
             else:
                 continue
@@ -301,9 +465,10 @@ def process():
             print(f"Error processing {audio_id}:")
             traceback.print_exc()
 
-        # Clear processing
+        # Clear processing, freeing both the global slot and the owner's quota.
         with lock:
             processing = ""
+            processing_client = ""
             start_time = 0
 
 
