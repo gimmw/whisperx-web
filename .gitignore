@@ -24,3 +24,8 @@ dist-ssr
 *.sw?
 
 __pycache__
+
+# Local environment files (may contain HF_TOKEN)
+.env
+.env.*
+!.env.example

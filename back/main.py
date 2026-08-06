@@ -1,16 +1,16 @@
+import os
 import threading
 import time
 import traceback
-import uuid
-from pathlib import Path
 import uuid
 from pathlib import Path
 from typing import NamedTuple
 
 import uvicorn
 from fastapi import FastAPI, Form, UploadFile, File
-from hypy_utils import write, write_json
+from hypy_utils import write_json
 from starlette.middleware.cors import CORSMiddleware
+from starlette.responses import JSONResponse
 from starlette.staticfiles import StaticFiles
 
 import metrics
@@ -19,11 +19,37 @@ from wp import diarized_transcribe
 app = FastAPI()
 
 # CORS
+#
+# Not needed in the normal deployment: the frontend proxies /api to this
+# service, so the browser stays on a single origin and CORS never applies.
+# Configurable for the case where the backend is exposed separately (e.g. its
+# own Ingress host), which makes requests genuinely cross-origin.
+#
+# Defaults to "*" rather than something restrictive because the correct value
+# depends entirely on the cluster's Ingress hostname, which this code cannot
+# know. See the note below on why that default is not the security risk it
+# looks like.
+#
+# NOTE: this is not an authentication boundary. The API has no accounts,
+# cookies or tokens, so CORS only constrains browsers; a direct client (curl,
+# a script) is unaffected regardless of what is configured here. The real
+# limits on abuse are the upload size cap and extension allowlist below.
+#
+# allow_credentials is deliberately False: nothing in this API uses cookies or
+# an Authorization header, and setting it True alongside allow_origins=["*"]
+# makes Starlette reflect the caller's Origin back with
+# Access-Control-Allow-Credentials: true — the most permissive combination
+# possible, and the one the CORS spec forbids expressing literally.
+_cors_origins = os.getenv("CORS_ORIGINS", "*")
+# Origin headers never carry a path, so a configured trailing slash would
+# silently never match. Normalise it away.
+ALLOW_ORIGINS = [o.strip().rstrip("/") for o in _cors_origins.split(",") if o.strip()] or ["*"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
+    allow_origins=ALLOW_ORIGINS,
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -31,6 +57,45 @@ TMP_DIR = Path("/tmp/whisper")
 TMP_DIR.mkdir(exist_ok=True)
 DATA_DIR = Path("/ws/tmp-whisper")
 DATA_DIR.mkdir(exist_ok=True)
+
+# Largest upload accepted, in bytes. Enforced while streaming so an oversized
+# body is abandoned early rather than after it has already been buffered.
+MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_MB", "512")) * 1024 * 1024
+
+# Size of each chunk read from the request stream during upload.
+UPLOAD_CHUNK_BYTES = 1024 * 1024
+
+# Extensions accepted for upload. The uploaded name is attacker-controlled and
+# is used to build a filesystem path, so only these exact values are ever
+# interpolated — never the raw client string.
+ALLOWED_EXTENSIONS = {
+    # audio
+    "mp3", "wav", "m4a", "flac", "ogg", "oga", "opus", "aac", "wma", "aiff", "aif",
+    # video (ffmpeg extracts the audio track)
+    "mp4", "mkv", "mov", "avi", "webm", "m4v", "mpg", "mpeg", "wmv", "flv", "3gp",
+}
+
+
+def _safe_extension(filename: str | None) -> str | None:
+    """Extract a validated lowercase extension from a client-supplied filename.
+
+    Returns None if the extension is missing or not allowlisted. Path
+    separators are stripped first: a name like "x.../../../etc/passwd" would
+    otherwise yield "/etc/passwd" from a naive rsplit, which then escapes
+    DATA_DIR when interpolated into a path.
+    """
+    if not filename:
+        return None
+
+    # Strip any directory component, handling both POSIX and Windows separators
+    # since the client controls this string and is not necessarily POSIX.
+    base = os.path.basename(filename.replace("\\", "/")).strip()
+    if "." not in base:
+        return None
+
+    ext = base.rsplit(".", 1)[-1].lower()
+    return ext if ext in ALLOWED_EXTENSIONS else None
+
 
 process_queue = []
 processing = ""
@@ -65,32 +130,68 @@ async def upload(
     max_speakers: str | None = Form(None),
     initial_prompt: str = Form(""),
 ):
+    # Validate the filename before touching the disk. Only the allowlisted
+    # extension is ever used to build the path; the rest of the client-supplied
+    # name is discarded.
+    ext = _safe_extension(file.filename)
+    if ext is None:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "Unsupported file type. Please upload an audio or video file."},
+        )
+
+    # Parse diarization options before writing anything, so bad input fails
+    # without leaving an orphaned file behind.
     try:
-        contents = await file.read()
-
-        # Get time in YYYY-MM-DD HH:MM:SS format
-        time_str = time.strftime("%Y-%m-%d %H:%M:%S")
-        print(f"[{time_str}] Received {file.filename}")
-
-        # Generate uuid for the audio file
-        audio_id = str(uuid.uuid4())
-        ext = file.filename.split('.')[-1]
-        fp = DATA_DIR / "audio" / f"{audio_id}.{ext}"
-        write(fp, contents)
-
-        # Parse diarization options
-        do_diarize = diarize.lower() == "true"
         min_spk = int(min_speakers) if min_speakers else None
         max_spk = int(max_speakers) if max_speakers else None
+    except ValueError:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "min_speakers and max_speakers must be integers"},
+        )
 
-        # Add to processing queue
-        with lock:
-            process_queue.append(PendingProcess(audio_id, fp, language, do_diarize, min_spk, max_spk, initial_prompt.strip()))
+    time_str = time.strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{time_str}] Received {file.filename!r} ({ext})")
 
-        return {"audio_id": audio_id}
+    audio_id = str(uuid.uuid4())
+    fp = DATA_DIR / "audio" / f"{audio_id}.{ext}"
+    fp.parent.mkdir(parents=True, exist_ok=True)
 
+    # Stream to disk in chunks rather than file.read(), which would buffer the
+    # entire upload in memory. The running total is checked as we go so an
+    # oversized body is rejected without ever being fully received or stored.
+    written = 0
+    try:
+        with open(fp, "wb") as out:
+            while chunk := await file.read(UPLOAD_CHUNK_BYTES):
+                written += len(chunk)
+                if written > MAX_UPLOAD_BYTES:
+                    raise ValueError("too large")
+                out.write(chunk)
+    except ValueError:
+        fp.unlink(missing_ok=True)
+        limit_mb = MAX_UPLOAD_BYTES // (1024 * 1024)
+        return JSONResponse(
+            status_code=413,
+            content={"error": f"File too large. Maximum upload size is {limit_mb} MB."},
+        )
     except Exception as e:
-        return {"error": str(e)}
+        fp.unlink(missing_ok=True)
+        traceback.print_exc()
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+    if written == 0:
+        fp.unlink(missing_ok=True)
+        return JSONResponse(status_code=400, content={"error": "Uploaded file is empty"})
+
+    do_diarize = diarize.lower() == "true"
+
+    # Add to processing queue
+    with lock:
+        process_queue.append(PendingProcess(audio_id, fp, language, do_diarize, min_spk, max_spk, initial_prompt.strip()))
+
+    return {"audio_id": audio_id}
 
 
 @app.get("/progress/{uuid}")

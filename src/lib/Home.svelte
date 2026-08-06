@@ -161,16 +161,31 @@
         if (initialPrompt.trim())
             formData.append('initial_prompt', initialPrompt.trim())
 
-        const res = await fetch(`${HOST}/upload`, {
-            method: 'POST',
-            body: formData
-        }).then(res => res.json())
+        let res: any
+        try {
+            const resp = await fetch(`${HOST}/upload`, {
+                method: 'POST',
+                body: formData
+            })
+            res = await resp.json()
+        } catch (e) {
+            // Network failure, or a response that wasn't JSON (e.g. a proxy
+            // error page). Without this the promise rejects unhandled and the
+            // UI stays stuck on "Uploading..." forever.
+            console.error('Upload failed', e)
+            error = 'Upload failed. Please check your connection and try again.'
+            isUploading = false
+            return
+        }
 
         console.log('Upload result', res)
 
         // Result should be a UUID
         if (res.error) {
+            // Rejections (unsupported type, file too large) are expected, so
+            // clear the uploading state to let the user pick another file.
             error = res.error
+            isUploading = false
         } else {
             // Redirect to /:uuid
             window.location.href = `/${res.audio_id}`;

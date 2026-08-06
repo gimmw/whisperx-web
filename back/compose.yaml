@@ -5,10 +5,22 @@ services:
       dockerfile: Dockerfile
     container_name: whisper-back
     restart: unless-stopped
-    ports:
-      - "49585:49585"
+    # No "ports" mapping: the backend is reached only through the frontend's
+    # /api proxy on the internal network. Publishing 49585 to the host would
+    # expose the unauthenticated API directly, which no CORS setting prevents.
+    # Uncomment to expose it for debugging:
+    # ports:
+    #   - "127.0.0.1:49585:49585"
+    expose:
+      - "49585"
     environment:
       - HF_TOKEN=${HF_TOKEN}
+      # Not needed while the frontend proxies through /api (same-origin, so
+      # CORS never applies). Set it to a comma-separated origin list only if a
+      # browser on another origin must call this backend directly.
+      - CORS_ORIGINS=${CORS_ORIGINS:-*}
+      # Maximum accepted upload size in MB.
+      - MAX_UPLOAD_MB=${MAX_UPLOAD_MB:-512}
       # You can also set CUDA_VISIBLE_DEVICES if needed
     volumes:
       - whisper-data:/ws/tmp-whisper
@@ -19,6 +31,24 @@ services:
             - driver: nvidia
               count: all
               capabilities: [compute, utility]
+
+  whisper-front:
+    build:
+      # The frontend Dockerfile copies package.json, src/ and front/, so its
+      # build context is the repo root rather than this directory.
+      context: ..
+      dockerfile: front/Dockerfile
+    container_name: whisper-front
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      # Defaults to /api (proxied to whisper-back). Override only to point the
+      # browser at an absolute backend URL, which reintroduces CORS.
+      - BACKEND_HOST=${BACKEND_HOST:-/api}
+      - TITLE=${TITLE:-}
+    depends_on:
+      - whisper-back
 
 volumes:
   whisper-data:
