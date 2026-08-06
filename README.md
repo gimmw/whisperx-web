@@ -16,21 +16,11 @@ Fork of [one-among-us/whisper-web](https://github.com/one-among-us/whisper-web) 
 
 This service does not use accounts or passwords. Each uploaded file is assigned a random, unguessable link (UUID) that is used to check progress and download the transcript — Anyone who has that link can access the results, so it should be treated like a private URL and not shared. 
 
-There is no way for other users to browse, list, or guess another user's files under normal circumstances, and the original audio file is never exposed for download; only the transcript is. 
+There is no way for other users to browse, list, or guess another user's files under normal circumstances, and the original audio file is never exposed for download; only the transcript is. The uploaded audio is deleted as soon as transcription finishes — successfully or not — so recordings are not kept on disk after the job that needed them. Transcripts are kept, and their retention is up to the operator (see below). 
 
 Uploads are processed one at a time in a first-in, first-out queue — If you upload while another job is running, your file waits its turn, and the progress page shows your position in the queue along with live CPU/GPU usage once your file starts processing. 
 
-Two limits keep one user from monopolising that queue. The whole service accepts
-`MAX_QUEUE_DEPTH` jobs at once (uploads beyond that are refused until a slot
-frees), and any single user may have `MAX_JOBS_PER_CLIENT` jobs queued or
-running at once. Both are refused at upload time with an explanatory message,
-and both clear themselves as jobs finish — there is no lasting penalty.
-
-Because the worker is serial, the worst-case wait is roughly `MAX_QUEUE_DEPTH`
-multiplied by your median job duration. Measure that before raising the default:
-a deep queue does not increase throughput, it only makes the last person in line
-wait longer. Users are identified by IP for the per-user limit, so people behind
-a shared NAT share a quota.
+Two limits keep one user from monopolising that queue. The whole service accepts `MAX_QUEUE_DEPTH` jobs at once (uploads beyond that are refused until a slot frees), and any single user may have `MAX_JOBS_PER_CLIENT` jobs queued or running at once. Both are refused at upload time with an explanatory message, and both clear themselves as jobs finish — there is no lasting penalty.
 
 
 ## Deployment
@@ -53,6 +43,28 @@ Two containers: a frontend (nginx serving the built SPA) and a backend (FastAPI
   directly, clients can set the header themselves and bypass the limit. The
   queue state is in-memory and per-pod, so both limits assume the single replica
   above and reset on restart.
+* The upload rate/concurrency limits in `front/nginx.conf` key on
+  `$remote_addr`. Behind an Ingress or CDN that is the *proxy's* address, so
+  every user collapses into one key and the limits apply globally — one user's
+  uploads would then block everyone. Uncomment the `set_real_ip_from` /
+  `real_ip_header` lines in that file and set them to the trusted proxy range.
+  The same applies to the `X-Real-IP` the backend uses. These limits are also
+  per-nginx-pod, so scale the frontend and each replica gets its own budget.
+
+#### Storage retention
+
+`/ws/tmp-whisper` holds two directories with different lifecycles:
+
+* `audio/` — uploads, up to `MAX_UPLOAD_MB` each. Deleted by the app as soon as
+  the job finishes, so peak usage is bounded by the queue depth rather than by
+  total traffic. No cleanup job is needed for these; a periodic sweep of files
+  older than a day or so is still worth having as a backstop for uploads
+  orphaned by a pod crash mid-job, but it should normally find nothing.
+* `transcription/` — the JSON results, a few KB each. These are the product and
+  are never deleted by the app, so they grow without bound. Expire them on
+  whatever schedule suits (e.g. a CronJob deleting by mtime); note that doing so
+  breaks the UUID link for anyone who bookmarked it, since the page re-fetches
+  the transcript from the server on every load.
 
 
 ### Environment variables

@@ -465,6 +465,27 @@ def process():
             print(f"Error processing {audio_id}:")
             traceback.print_exc()
 
+        finally:
+            # The source audio is dead once transcription returns: it is read
+            # exactly once (whisperx.load_audio in wp.py) and nothing serves or
+            # re-reads it afterwards -- only the transcript is downloadable.
+            # Deleting it here rather than on a schedule keeps peak disk bounded
+            # by the queue depth instead of by the cleanup interval, and keeps
+            # raw voice recordings on disk for the shortest time possible.
+            #
+            # In `finally` so a failed job cleans up too: those files would
+            # otherwise be the ones that linger, since nothing will ever revisit
+            # them.
+            #
+            # Never let cleanup raise: this runs on the single worker thread, so
+            # an unhandled exception here would end the thread and silently
+            # freeze the queue for every subsequent job.
+            try:
+                pending.file.unlink(missing_ok=True)
+            except Exception:
+                print(f"Could not delete audio for {audio_id}:")
+                traceback.print_exc()
+
         # Clear processing, freeing both the global slot and the owner's quota.
         with lock:
             processing = ""
