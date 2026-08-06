@@ -101,7 +101,18 @@ process_queue = []
 processing = ""
 start_time = 0
 lock = threading.Lock()
-errors = {}
+
+# Set of audio_ids whose processing failed. Only membership is tracked, never
+# the exception detail: this is served to unauthenticated clients, and a
+# traceback would disclose absolute filesystem paths, dependency versions and
+# internal structure. The full traceback goes to the server log instead, keyed
+# by audio_id so an operator can correlate a user's report with it.
+errors: set[str] = set()
+
+# Message shown to clients for any server-side failure. Deliberately fixed and
+# uninformative -- the audio_id accompanying it is what makes a report
+# actionable, not the text.
+GENERIC_ERROR = "Transcription failed. Please try again, or contact the administrator with this ID."
 
 app.mount("/result", StaticFiles(directory=DATA_DIR / "transcription"), name="result")
 
@@ -176,10 +187,17 @@ async def upload(
             status_code=413,
             content={"error": f"File too large. Maximum upload size is {limit_mb} MB."},
         )
-    except Exception as e:
+    except Exception:
         fp.unlink(missing_ok=True)
+        # Log the detail, return none of it: this path catches arbitrary
+        # exceptions (disk full, permission denied) whose messages embed
+        # absolute paths and other internals.
+        print(f"Error saving upload {audio_id}:")
         traceback.print_exc()
-        return JSONResponse(status_code=500, content={"error": str(e)})
+        return JSONResponse(
+            status_code=500,
+            content={"error": "Could not save the uploaded file. Please try again."},
+        )
 
     if written == 0:
         fp.unlink(missing_ok=True)
@@ -217,7 +235,9 @@ def progress(uuid: str):
             "status": _status_line(m, elapsed),
         }
     elif uuid in errors:
-        return {"done": False, "state": "error", "status": "Error", "error": errors[uuid]}
+        # No exception detail here: see the note on `errors`. The id is echoed
+        # so the user can quote it and an operator can find the logged trace.
+        return {"done": False, "state": "error", "status": GENERIC_ERROR, "error_id": uuid}
     else:
         index = 0
         with lock:
@@ -274,9 +294,12 @@ def process():
                 "elapsed": elapsed
             })
 
-        except Exception as e:
-            errors[audio_id] = str(e) + "\n\n" + traceback.format_exc()
-            print(f"Error processing {audio_id}: {e}")
+        except Exception:
+            # Record only that this id failed; the diagnostic detail stays
+            # server-side, keyed by the same id the client is shown.
+            errors.add(audio_id)
+            print(f"Error processing {audio_id}:")
+            traceback.print_exc()
 
         # Clear processing
         with lock:

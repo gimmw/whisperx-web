@@ -199,7 +199,8 @@
             {/each}
         </div>
     {:else if state === 'error'}
-        <p>Progress: {progress}</p>
+        <p class="error-line">{progress || 'Transcription failed.'}</p>
+        <p class="error-id">ID: <code>{id}</code></p>
     {:else if state === 'processing'}
         <p class="status-line">Processing &middot; {Math.round(elapsed)}s elapsed</p>
 
@@ -306,6 +307,16 @@
       font-size: 0.85em
       color: #ff9595
       opacity: 0.8
+
+    .error-line
+      color: #ff9595
+
+    .error-id
+      font-size: 0.8em
+      opacity: 0.5
+
+      code
+        font-family: monospace
 
     .blocks
       display: flex
