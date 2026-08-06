@@ -1,5 +1,7 @@
 <script lang="ts">
     import { onMount, onDestroy } from 'svelte';
+    import { Link } from 'svelte-routing';
+    import Icon from '@iconify/svelte';
     import {HOST} from "./config";
     import moment from 'moment';
 
@@ -166,6 +168,15 @@
 </script>
 
 <main>
+    <nav class="back-nav">
+        <Link to="/">
+            <span class="back-link">
+                <Icon icon="tabler:arrow-left" width="18" height="18" />
+                New transcription
+            </span>
+        </Link>
+    </nav>
+
     <h1>Transcription Progress</h1>
     {#if isDone && result}
         <p>Transcription complete ({result.elapsed[0].toFixed(1)}s + {result.elapsed[1].toFixed(1)}s). Your file will download shortly.</p>
@@ -241,6 +252,22 @@
 </main>
 
 <style lang="sass">
+    .back-nav
+      display: flex
+      justify-content: flex-start
+      margin-bottom: 0.5rem
+
+      .back-link
+        display: inline-flex
+        align-items: center
+        gap: 0.35rem
+        font-size: 0.9rem
+        color: rgba(255, 255, 255, 0.6)
+        transition: color 0.2s ease
+
+        &:hover
+          color: rgba(255, 255, 255, 0.95)
+
     .status-line
       opacity: 0.85
 
