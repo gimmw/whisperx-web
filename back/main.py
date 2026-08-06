@@ -54,9 +54,21 @@ app.add_middleware(
 )
 
 TMP_DIR = Path("/tmp/whisper")
-TMP_DIR.mkdir(exist_ok=True)
+TMP_DIR.mkdir(parents=True, exist_ok=True)
 DATA_DIR = Path("/ws/tmp-whisper")
-DATA_DIR.mkdir(exist_ok=True)
+
+# Both subdirectories, not just DATA_DIR itself.
+#
+# The Dockerfile creates these, but a volume mounted at /ws/tmp-whisper shadows
+# whatever the image layer had there, so on a freshly provisioned PVC they are
+# absent. The StaticFiles mount below resolves its directory when it is
+# constructed -- at import time -- and raises RuntimeError if it is missing, so
+# a new PVC would crash the process before uvicorn ever bound a port.
+#
+# parents=True because DATA_DIR itself may also be new; exist_ok=True so a
+# restart onto an existing volume is a no-op.
+for _sub in ("audio", "transcription"):
+    (DATA_DIR / _sub).mkdir(parents=True, exist_ok=True)
 
 # Largest upload accepted, in bytes. Enforced while streaming so an oversized
 # body is abandoned early rather than after it has already been buffered.

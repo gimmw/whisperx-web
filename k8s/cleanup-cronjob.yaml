@@ -1,0 +1,101 @@
+# Periodic cleanup of the whisper data volume.
+#
+# Adjust as required
+# (PVC name, namespace, schedule, retention) before applying.
+#
+# Scope:
+#   transcription/  the actual retention policy -- these are never deleted by
+#                   the app, so this job is the only thing bounding them.
+#   audio/          a backstop only. The app deletes each upload as soon as its
+#                   job finishes, so this should normally find nothing; it
+#                   exists to catch files orphaned by a pod crash mid-job.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: whisper-cleanup
+  namespace: whisper-web
+spec:
+  schedule: "30 3 * * *"
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 3600
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 1800
+      template:
+        spec:
+          restartPolicy: Never
+          securityContext:
+            # MUST match the backend's runtime user (APP_UID/APP_GID in
+            # back/Dockerfile), or this job cannot delete the files the backend
+            # created. 
+            runAsUser: 10001
+            runAsGroup: 10001
+            runAsNonRoot: true
+            fsGroup: 10001
+          containers:
+            - name: prune
+              # GNU-coreutils image rather than busybox/alpine.
+              # busybox's find exits 0 even when every delete fails with
+              # EPERM, so a misconfigured job would report success forever
+              # while deleting nothing. GNU find exits 1, which surfaces as a
+              # Failed job. Verified both.
+              image: debian:stable-slim
+              imagePullPolicy: IfNotPresent
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              env:
+                # retention window for transcripts, in days.
+                - name: TRANSCRIPT_DAYS
+                  value: "7"
+                # Orphaned-upload backstop. Comfortably longer than any single
+                # job, so it can never race a transcription in progress.
+                - name: AUDIO_DAYS
+                  value: "1"
+                - name: DATA_DIR
+                  value: /ws/tmp-whisper
+
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  set -eu
+                  for d in "$DATA_DIR/transcription" "$DATA_DIR/audio"; do
+                    [ -d "$d" ] || { echo "FATAL: $d missing -- wrong PVC or subPath?" >&2; exit 1; }
+                  done
+
+                  prune() {
+                    dir="$1"; days="$2"; pattern="$3"
+                    before=$(find "$dir" -type f | wc -l)
+                    # -mtime +N is strictly older than N days.
+                    find "$dir" -type f -name "$pattern" -mtime +"$days" -print -delete
+                    after=$(find "$dir" -type f | wc -l)
+                    echo "$dir: $before -> $after (deleted $((before - after)), kept >${days}d policy)"
+                  }
+
+                  prune "$DATA_DIR/transcription" "$TRANSCRIPT_DAYS" '*.json'
+
+                  # Anything here means an upload was orphaned by a crash --
+                  # worth noticing, since the app deletes these itself.
+                  orphans=$(find "$DATA_DIR/audio" -type f -mtime +"$AUDIO_DAYS" | wc -l)
+                  [ "$orphans" -eq 0 ] || echo "NOTE: $orphans orphaned upload(s); expected 0 (app deletes on completion)"
+                  prune "$DATA_DIR/audio" "$AUDIO_DAYS" '*'
+
+                  echo "cleanup OK"
+              volumeMounts:
+                - name: data
+                  mountPath: /ws/tmp-whisper
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 32Mi
+                limits:
+                  memory: 128Mi
+          volumes:
+            - name: data
+              persistentVolumeClaim:
+                claimName: whisper-data

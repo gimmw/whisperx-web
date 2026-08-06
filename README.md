@@ -62,9 +62,12 @@ Two containers: a frontend (nginx serving the built SPA) and a backend (FastAPI
   orphaned by a pod crash mid-job, but it should normally find nothing.
 * `transcription/` — the JSON results, a few KB each. These are the product and
   are never deleted by the app, so they grow without bound. Expire them on
-  whatever schedule suits (e.g. a CronJob deleting by mtime); note that doing so
-  breaks the UUID link for anyone who bookmarked it, since the page re-fetches
-  the transcript from the server on every load.
+  whatever schedule suits; note that doing so breaks the UUID link for anyone
+  who bookmarked it, since the page re-fetches the transcript from the server on
+  every load.
+
+`k8s/cleanup-cronjob.yaml` is a starting point covering both — check the PVC
+name, namespace, schedule and retention window before applying.
 
 
 ### Environment variables
