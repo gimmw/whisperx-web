@@ -3,6 +3,7 @@ import threading
 import time
 import traceback
 import uuid
+from json import dumps as json_dumps
 from pathlib import Path
 from typing import NamedTuple
 
@@ -17,6 +18,115 @@ import metrics
 from wp import AudioTooLong, diarized_transcribe
 
 app = FastAPI()
+
+
+class BodySizeLimitMiddleware:
+    """Reject oversized request bodies before anything can buffer them.
+
+    Written as raw ASGI rather than a BaseHTTPMiddleware/@app.middleware
+    function on purpose: this has to intercept the `receive` channel itself.
+    Everything higher up -- route handlers, dependencies, Request.form() --
+    only sees the body after Starlette's MultiPartParser has already pulled it
+    off the wire and spooled it to a temporary file, which is exactly the cost
+    being avoided.
+
+    Two layers, because neither alone is sufficient:
+
+    * Content-Length, when present and over the limit, lets us refuse without
+      reading a single byte. It is client-supplied and therefore not
+      trustworthy as an *upper* bound -- a liar can understate it -- but a
+      client that declares an oversized body is telling the truth against its
+      own interest, so it is safe to act on.
+    * The streaming counter is the real enforcement: it covers chunked
+      transfer encoding (no Content-Length at all) and any understated header,
+      by cutting the stream the moment the running total passes the cap.
+    """
+
+    def __init__(self, app, max_bytes: int, paths: frozenset[str]):
+        self.app = app
+        self.max_bytes = max_bytes
+        self.paths = paths
+
+    async def __call__(self, scope, receive, send):
+        # Only guard the upload endpoints. Everything else on this API has a
+        # trivially small body, and wrapping receive for them would add work to
+        # the once-per-second progress poll for no benefit.
+        if scope["type"] != "http" or scope.get("path") not in self.paths:
+            return await self.app(scope, receive, send)
+
+        for key, value in scope.get("headers") or ():
+            if key == b"content-length":
+                try:
+                    declared = int(value)
+                except ValueError:
+                    break
+                if declared > self.max_bytes:
+                    return await self._reject(send)
+                break
+
+        received = 0
+        exceeded = False
+
+        async def limited_receive():
+            nonlocal received, exceeded
+            message = await receive()
+            if message["type"] == "http.request":
+                received += len(message.get("body", b""))
+                if received > self.max_bytes:
+                    exceeded = True
+                    # Surfacing this as a disconnect stops the multipart
+                    # parser mid-stream. It raises ClientDisconnect out of the
+                    # app, which is caught below -- the alternative, feeding a
+                    # truncated body through as if complete, would hand the
+                    # handler a corrupt file and a misleading success.
+                    return {"type": "http.disconnect"}
+            return message
+
+        response_started = False
+
+        async def guarded_send(message):
+            nonlocal response_started
+            # Once the limit is blown, suppress whatever the app tries to say
+            # so that the 413 below is the only response on the wire. Without
+            # this, an app-level error response would be sent first and the
+            # 413 would be a protocol violation.
+            if exceeded:
+                return
+            if message["type"] == "http.response.start":
+                response_started = True
+            await send(message)
+
+        try:
+            await self.app(scope, limited_receive, guarded_send)
+        except Exception:
+            # A truncated body legitimately raises (ClientDisconnect, or a
+            # parser error). That is the expected path here, not a fault worth
+            # logging -- but only when we caused it.
+            if not exceeded:
+                raise
+
+        if exceeded and not response_started:
+            await self._reject(send)
+
+    async def _reject(self, send):
+        limit_mb = self.max_bytes // (1024 * 1024)
+        body = json_dumps(
+            {"error": f"File too large. Maximum upload size is {limit_mb} MB."}
+        ).encode()
+        await send({
+            "type": "http.response.start",
+            "status": 413,
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"content-length", str(len(body)).encode()),
+                # The SPA reads res.error from the JSON body; keep CORS working
+                # for the separately-exposed-backend deployment, since this
+                # response bypasses CORSMiddleware entirely.
+                (b"access-control-allow-origin", b"*"),
+            ],
+        })
+        await send({"type": "http.response.body", "body": body})
+
 
 # CORS
 #
@@ -70,12 +180,34 @@ DATA_DIR = Path("/ws/tmp-whisper")
 for _sub in ("audio", "transcription"):
     (DATA_DIR / _sub).mkdir(parents=True, exist_ok=True)
 
-# Largest upload accepted, in bytes. Enforced while streaming so an oversized
-# body is abandoned early rather than after it has already been buffered.
+# Largest upload accepted, in bytes.
+#
+# Enforced by BodySizeLimitMiddleware below, NOT by the handler. The handler
+# cannot do it: `file: UploadFile = File(...)` is a dependency, so FastAPI runs
+# the multipart parser before the function body executes, and that parser
+# consumes the entire request body into a SpooledTemporaryFile first. Any check
+# written inside upload() -- on Content-Length or on the read() loop -- runs
+# after the bytes are already on disk, and returns a correct-looking 413 while
+# having prevented nothing. Measured: a 200 MB body against a 512 MB cap was
+# fully received and spooled before the first line of the handler ran.
 MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_MB", "512")) * 1024 * 1024
 
 # Size of each chunk read from the request stream during upload.
 UPLOAD_CHUNK_BYTES = 1024 * 1024
+
+# Installed last so it ends up OUTERMOST: add_middleware prepends, so the
+# most recently added wrapper is entered first. The size guard must see the
+# request before CORSMiddleware and before routing, since the whole point is to
+# act ahead of the multipart parser.
+#
+# Scoped to the upload path only. "/upload" is what the frontend's nginx passes
+# through after stripping the /api prefix; "/api/upload" covers the backend
+# being exposed directly without that rewrite.
+app.add_middleware(
+    BodySizeLimitMiddleware,
+    max_bytes=MAX_UPLOAD_BYTES,
+    paths=frozenset({"/upload", "/api/upload"}),
+)
 
 # Maximum number of jobs waiting or running at once, across all clients.
 #
@@ -371,9 +503,15 @@ async def upload(
         fp.parent.mkdir(parents=True, exist_ok=True)
 
         # Stream to disk in chunks rather than file.read(), which would buffer
-        # the entire upload in memory. The running total is checked as we go so
-        # an oversized body is rejected without ever being fully received or
-        # stored.
+        # the whole upload in memory a second time.
+        #
+        # The size check here is a backstop, not the enforcement:
+        # BodySizeLimitMiddleware has already capped the body before this
+        # handler was reached, so in normal operation `written` cannot exceed
+        # the limit. It is kept so that the guarantee does not rest solely on
+        # the middleware still being installed and correctly scoped -- if the
+        # path allowlist above ever drifts from the real route, this is what
+        # stops an unbounded write to the data volume.
         written = 0
         try:
             with open(fp, "wb") as out:

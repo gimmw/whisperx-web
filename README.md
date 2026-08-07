@@ -81,7 +81,7 @@ Frontend:
 
 Backend:
 * `HF_TOKEN` - huggingface api token
-* `MAX_UPLOAD_MB` - maximum accepted upload size in MB (default `512`).
+* `MAX_UPLOAD_MB` - maximum accepted upload size in MB (default `512`). Make sure to also set `client_max_body_size` accordingly in `front/nginx.conf`
 * `MAX_AUDIO_SECONDS` - maximum audio duration in seconds (default `14400`, 4h). Over-length files
   are rejected before decoding.
 * `FFMPEG_TIMEOUT` - seconds before a decode is abandoned (default `1800`).
