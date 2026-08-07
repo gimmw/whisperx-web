@@ -228,13 +228,16 @@
 
         {#if enableDiarization}
             <div class="speaker-opts">
+                <!-- min="0" because the backend treats 0 as "no preference",
+                     the same as leaving the field blank. Keeping min="1" here
+                     would let the browser block a value the API accepts. -->
                 <label>
                     Min speakers
-                    <input type="number" min="1" max="20" placeholder="auto" bind:value={minSpeakers} />
+                    <input type="number" min="0" max="20" placeholder="auto" bind:value={minSpeakers} />
                 </label>
                 <label>
                     Max speakers
-                    <input type="number" min="1" max="20" placeholder="auto" bind:value={maxSpeakers} />
+                    <input type="number" min="0" max="20" placeholder="auto" bind:value={maxSpeakers} />
                 </label>
             </div>
         {/if}

@@ -12,6 +12,11 @@ Fork of [one-among-us/whisper-web](https://github.com/one-among-us/whisper-web) 
 * Speaker diarisation
 
 
+## Diarisation
+
+The `min_speakers` / `max_speakers` upload fields are optional hints for diarisation. Omit them, leave them blank, or send `0` to let the model detect the speaker count itself. 
+
+
 ## Multi-user model
 
 This service does not use accounts or passwords. Each uploaded file is assigned a random, unguessable link (UUID) that is used to check progress and download the transcript — Anyone who has that link can access the results, so it should be treated like a private URL and not shared. 
@@ -92,6 +97,7 @@ Backend:
   (default `10`). Further uploads are refused with `503` until a slot frees.
 * `MAX_JOBS_PER_CLIENT` - jobs a single user may have queued or running at once
   (default `2`). Further uploads are refused with `429` until one finishes.
+
 
 
 ## LLM Disclosure 🤖🧠

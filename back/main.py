@@ -225,6 +225,16 @@ MAX_QUEUE_DEPTH = int(os.getenv("MAX_QUEUE_DEPTH", "10"))
 # is no time window to track and no penalty that outlives the work.
 MAX_JOBS_PER_CLIENT = int(os.getenv("MAX_JOBS_PER_CLIENT", "2"))
 
+# Upper bound on the speaker-count hints, mirroring the max="20" on the number
+# inputs in src/lib/Home.svelte.
+#
+# Those attributes are advisory: the browser will not submit a larger value
+# through the UI, but nothing stops a direct POST, so the real check has to be
+# here. Diarising a recording with more than this many distinct speakers is
+# well outside what this service is for, and the value only ever narrows the
+# search, so a generous ceiling costs nothing.
+MAX_SPEAKERS = 20
+
 # Language codes accepted, mirroring the picker in src/lib/Home.svelte plus
 # "auto" for detection. Whisper's own set, so anything outside it is a client
 # bug or a probe rather than a usable request.
@@ -277,6 +287,61 @@ def _safe_extension(filename: str | None) -> str | None:
 
     ext = base.rsplit(".", 1)[-1].lower()
     return ext if ext in ALLOWED_EXTENSIONS else None
+
+
+class SpeakerCountError(ValueError):
+    """Raised when a speaker-count hint is unusable. Message is client-safe."""
+
+
+def _parse_speaker_count(raw: str | None, field: str) -> int | None:
+    """Validate one of the min/max speaker hints.
+
+    Returns None for "no preference", which is what pyannote wants for
+    autodetection. Both an absent field and an explicit 0 map to None:
+    pyannote's set_num_speakers does `min_speakers = num_speakers or
+    min_speakers or 1`, so a falsy 0 already falls through to the default --
+    normalising it here makes that behaviour intentional and explicit rather
+    than an accident of truthiness, and keeps 0 working as "autodetect" for
+    clients that send it.
+
+    Anything else must be a plain integer in [1, MAX_SPEAKERS]. Bare int()
+    would accept values pyannote does not defend against: negatives survive
+    set_num_speakers untouched (verified: min=-5 yields bounds [-5, inf]), and
+    while the clustering stage happens to clamp them to >=1 today, that is an
+    implementation detail two libraries down, not a contract.
+    """
+    if raw is None:
+        return None
+
+    raw = raw.strip()
+    if not raw:
+        return None
+
+    # Require plain ASCII digits rather than relying on int(), which also
+    # accepts underscore separators ("1_0" -> 10), a leading sign, and
+    # non-ASCII decimal digits ("١٢" -> 12). None of those are dangerous here
+    # -- the range check below bounds the result either way -- but a field the
+    # UI renders as <input type="number"> should not quietly reinterpret them.
+    digits = raw[1:] if raw[0] == "-" else raw
+    if not (digits.isascii() and digits.isdigit()):
+        raise SpeakerCountError(f"{field} must be a whole number.")
+
+    # Checked before int() so a negative gets the specific message rather than
+    # the generic one, which would be actively misleading -- "-5" *is* a whole
+    # number, it is just not a usable speaker count.
+    if raw[0] == "-" and any(c != "0" for c in digits):
+        raise SpeakerCountError(f"{field} cannot be negative.")
+
+    value = int(raw)
+
+    # Explicit "no preference".
+    if value == 0:
+        return None
+
+    if value > MAX_SPEAKERS:
+        raise SpeakerCountError(f"{field} cannot be greater than {MAX_SPEAKERS}.")
+
+    return value
 
 
 def _client_key(request: Request) -> str:
@@ -450,12 +515,22 @@ async def upload(
     # Parse diarization options before writing anything, so bad input fails
     # without leaving an orphaned file behind.
     try:
-        min_spk = int(min_speakers) if min_speakers else None
-        max_spk = int(max_speakers) if max_speakers else None
-    except ValueError:
+        min_spk = _parse_speaker_count(min_speakers, "min_speakers")
+        max_spk = _parse_speaker_count(max_speakers, "max_speakers")
+    except SpeakerCountError as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+
+    # Reject an inverted range here rather than letting pyannote raise it.
+    # set_num_speakers does raise ValueError for min > max, but that happens on
+    # the worker thread after the upload has been stored and queued -- the user
+    # would wait through the queue only to be told their request was invalid,
+    # and the failure would surface as the generic server-error message since
+    # nothing distinguishes it from a real fault. Both being None (autodetect)
+    # skips this, as does either one alone.
+    if min_spk is not None and max_spk is not None and min_spk > max_spk:
         return JSONResponse(
             status_code=400,
-            content={"error": "min_speakers and max_speakers must be integers"},
+            content={"error": "min_speakers cannot be greater than max_speakers."},
         )
 
     language = (language or "").strip().lower()
