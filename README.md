@@ -82,6 +82,14 @@ Frontend:
 Backend:
 * `HF_TOKEN` - huggingface api token
 * `MAX_UPLOAD_MB` - maximum accepted upload size in MB (default `512`).
+* `MAX_AUDIO_SECONDS` - maximum audio duration in seconds (default `14400`, 4h).
+  Separate from `MAX_UPLOAD_MB` because that caps the *compressed* size, which
+  says little about memory use: decoded audio is a fixed 64 KB/s, so 2h of
+  silence fits in a 2.6 MB file that expands to 439 MB in RAM. Over-length files
+  are rejected before decoding, and the user is told the actual limit.
+* `FFMPEG_TIMEOUT` - seconds before a decode is abandoned (default `1800`).
+  A malformed file that makes ffmpeg spin would otherwise hang the single worker
+  thread and stall the queue for everyone.
 * `CORS_ORIGINS` - comma-separated list of browser origins allowed to call the
   API, e.g. `https://whisper.internal.example`. Defaults to `*`. Not needed in
   the default same-origin setup (/api) above.

@@ -1,7 +1,9 @@
 import gc
+import subprocess
 import time
 from pathlib import Path
 
+import numpy as np
 import os
 import torch
 import whisperx
@@ -11,6 +13,127 @@ DEVICE = "cuda"
 COMPUTE_TYPE = "float16"
 BATCH_SIZE = 16
 HF_TOKEN = os.getenv("HF_TOKEN")
+
+# Sample rate whisper expects; also what the decode below resamples to.
+SAMPLE_RATE = 16000
+
+# Longest audio accepted, in seconds (default 4h).
+#
+# This is a memory control, not a policy one. Decoded audio is float32 mono at
+# 16 kHz -- 64 KB per second -- and the container format says nothing about how
+# much that expands to: 2h of silence fits in a 2.6 MB Opus file that decodes to
+# 439 MB, a ~170x amplification. MAX_UPLOAD_MB cannot bound this because the
+# limit is on the *compressed* size. Without a duration cap a handful of small,
+# entirely valid uploads can OOM the pod.
+MAX_AUDIO_SECONDS = float(os.getenv("MAX_AUDIO_SECONDS", str(4 * 3600)))
+
+# Wall-clock ceiling for the two ffmpeg subprocesses.
+#
+# Neither has a timeout upstream (whisperx's load_audio calls subprocess.run
+# with no timeout=). A malformed file that makes ffmpeg spin would hang the
+# single worker thread forever, permanently wedging the queue for every
+# subsequent job -- a worse outcome than the job simply failing.
+FFPROBE_TIMEOUT = 30
+FFMPEG_TIMEOUT = int(os.getenv("FFMPEG_TIMEOUT", "1800"))
+
+
+class AudioTooLong(Exception):
+    """Raised when a file's duration exceeds MAX_AUDIO_SECONDS."""
+
+
+def _fmt_duration(seconds: float) -> str:
+    """Human-readable duration. Always hours would render a 60s limit as 0.0h."""
+    if seconds >= 3600:
+        return f"{seconds / 3600:.1f}h"
+    if seconds >= 60:
+        return f"{seconds / 60:.0f}min"
+    return f"{seconds:.0f}s"
+
+
+def probe_duration(fp: str | Path) -> float | None:
+    """Duration in seconds from the container header, without decoding.
+
+    Returns None when ffprobe cannot determine it (some streams genuinely have
+    no duration in the header). None is "unknown", not "zero" -- the caller
+    decides what to do with it, and must not treat it as a passing check.
+    """
+    try:
+        out = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                str(fp),
+            ],
+            capture_output=True,
+            timeout=FFPROBE_TIMEOUT,
+            check=True,
+        ).stdout.decode(errors="replace").strip()
+    except (subprocess.SubprocessError, OSError):
+        return None
+
+    try:
+        d = float(out)
+    except ValueError:
+        return None
+    # ffprobe reports "N/A" as nan for some containers.
+    return d if d == d and d >= 0 else None
+
+
+def load_audio_bounded(fp: str | Path) -> np.ndarray:
+    """whisperx.load_audio, but duration-checked and timeout-bounded.
+
+    Reimplemented rather than wrapped because the upstream version has no
+    timeout and buffers the whole decoded stream via capture_output before
+    returning -- which is exactly the step that needs bounding.
+    """
+    duration = probe_duration(fp)
+
+    # Reject a known-too-long file before spending anything on decoding it.
+    if duration is not None and duration > MAX_AUDIO_SECONDS:
+        raise AudioTooLong(
+            f"Audio is {_fmt_duration(duration)}; the maximum is "
+            f"{_fmt_duration(MAX_AUDIO_SECONDS)}."
+        )
+
+    cmd = [
+        "ffmpeg", "-nostdin", "-threads", "0",
+        "-i", str(fp),
+        # Hard cap the decoded stream. This is the load-bearing guard: it
+        # applies even when the probe returned None, and it also covers a
+        # header that understates the real duration. Reading one extra second
+        # lets the post-check below distinguish "at the limit" from "over it".
+        "-t", str(MAX_AUDIO_SECONDS + 1),
+        "-f", "s16le", "-ac", "1", "-acodec", "pcm_s16le",
+        "-ar", str(SAMPLE_RATE),
+        "-",
+    ]
+    try:
+        out = subprocess.run(
+            cmd, capture_output=True, check=True, timeout=FFMPEG_TIMEOUT
+        ).stdout
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError(
+            f"Decoding timed out after {FFMPEG_TIMEOUT}s"
+        ) from e
+    except subprocess.CalledProcessError as e:
+        # Only the tail of stderr: ffmpeg prints its full build configuration
+        # on every invocation, which buries the actual error. This goes to the
+        # log only -- the handler in main.py maps RuntimeError to the generic
+        # client message, so none of it reaches the user.
+        tail = e.stderr.decode(errors="replace").strip().splitlines()[-5:]
+        raise RuntimeError("Failed to load audio: " + " | ".join(tail)) from e
+
+    audio = np.frombuffer(out, np.int16).flatten().astype(np.float32) / 32768.0
+
+    # Catches the lying-header case: -t truncated the stream, so check what we
+    # actually got rather than what the container claimed.
+    if len(audio) / SAMPLE_RATE > MAX_AUDIO_SECONDS:
+        raise AudioTooLong(
+            f"Audio exceeds the maximum of {_fmt_duration(MAX_AUDIO_SECONDS)}."
+        )
+
+    return audio
 
 # Initialize WhisperX model (wraps faster-whisper with batched inference + VAD)
 wx_model = whisperx.load_model(
@@ -39,7 +162,7 @@ def diarized_transcribe(
     initial_prompt: str = "",
     task: str = "transcribe",
 ) -> tuple[dict, tuple[float, float]]:
-    audio = whisperx.load_audio(str(fp))
+    audio = load_audio_bounded(fp)
 
     # 1. Transcribe (batched, VAD-preprocessed)
     t0 = time.time()

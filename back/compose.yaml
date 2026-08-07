@@ -21,6 +21,12 @@ services:
       - CORS_ORIGINS=${CORS_ORIGINS:-*}
       # Maximum accepted upload size in MB.
       - MAX_UPLOAD_MB=${MAX_UPLOAD_MB:-512}
+      # Duration cap. Bounds decoded memory (64 KB/s), which the upload size
+      # limit cannot: compressed size says nothing about how far it expands.
+      - MAX_AUDIO_SECONDS=${MAX_AUDIO_SECONDS:-14400}
+      # Abandon a decode that runs this long, so a malformed file cannot hang
+      # the worker thread and stall the queue.
+      - FFMPEG_TIMEOUT=${FFMPEG_TIMEOUT:-1800}
       # Total jobs queued or running at once. The worker is serial, so this
       # multiplied by the median job time is roughly the worst-case wait.
       - MAX_QUEUE_DEPTH=${MAX_QUEUE_DEPTH:-10}

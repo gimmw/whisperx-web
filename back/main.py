@@ -14,7 +14,7 @@ from starlette.responses import JSONResponse
 from starlette.staticfiles import StaticFiles
 
 import metrics
-from wp import diarized_transcribe
+from wp import AudioTooLong, diarized_transcribe
 
 app = FastAPI()
 
@@ -93,6 +93,28 @@ MAX_QUEUE_DEPTH = int(os.getenv("MAX_QUEUE_DEPTH", "10"))
 # is no time window to track and no penalty that outlives the work.
 MAX_JOBS_PER_CLIENT = int(os.getenv("MAX_JOBS_PER_CLIENT", "2"))
 
+# Language codes accepted, mirroring the picker in src/lib/Home.svelte plus
+# "auto" for detection. Whisper's own set, so anything outside it is a client
+# bug or a probe rather than a usable request.
+#
+# Not a shell-injection concern -- nothing here reaches a shell -- but the value
+# is passed straight to the model, and an unrecognised code silently produces
+# nonsense output rather than an error. Rejecting it up front turns a confusing
+# transcript into a clear 400.
+ALLOWED_LANGUAGES = {
+    "auto",
+    "en", "zh", "de", "es", "ru", "ko", "fr", "ja", "pt", "tr", "pl",
+    "ca", "nl", "ar", "sv", "it", "id", "hi", "fi", "vi", "he", "uk",
+    "el", "ms", "cs", "ro", "da", "hu", "ta", "no", "th", "ur", "hr",
+    "bg", "lt", "la", "mi", "ml", "cy", "sk", "te", "fa", "lv", "bn",
+    "sr", "az", "sl", "kn", "et", "mk", "br", "eu", "is", "hy", "ne",
+    "mn", "bs", "kk", "sq", "sw", "gl", "mr", "pa", "si", "km", "sn",
+    "yo", "so", "af", "oc", "ka", "be", "tg", "sd", "gu", "am", "yi",
+    "lo", "uz", "fo", "ht", "ps", "tk", "nn", "mt", "sa", "lb", "my",
+    "bo", "tl", "mg", "as", "tt", "haw", "ln", "ha", "ba", "jw", "su",
+    "yue",
+}
+
 # Extensions accepted for upload. The uploaded name is attacker-controlled and
 # is used to build a filesystem path, so only these exact values are ever
 # interpolated — never the raw client string.
@@ -170,12 +192,19 @@ lock = threading.Lock()
 # these and the jobs actually in the system.
 reserved: dict[str, int] = {}
 
-# Set of audio_ids whose processing failed. Only membership is tracked, never
-# the exception detail: this is served to unauthenticated clients, and a
-# traceback would disclose absolute filesystem paths, dependency versions and
-# internal structure. The full traceback goes to the server log instead, keyed
-# by audio_id so an operator can correlate a user's report with it.
-errors: set[str] = set()
+# Failed audio_ids, mapped to a client-safe explanation or None.
+#
+# None means "server fault", and the client is shown GENERIC_ERROR: the
+# exception detail is never exposed, since a traceback would disclose absolute
+# filesystem paths, dependency versions and internal structure. The full
+# traceback goes to the server log instead, keyed by audio_id so an operator can
+# correlate a user's report with it.
+#
+# A string is used only for failures caused by the *input* -- currently just an
+# over-long file. Those are the user's to fix, and telling them to contact an
+# administrator would be actively unhelpful. Every such string is written here
+# in this file, never derived from an exception message.
+errors: dict[str, str | None] = {}
 
 # Message shown to clients for any server-side failure. Deliberately fixed and
 # uninformative -- the audio_id accompanying it is what makes a report
@@ -297,6 +326,13 @@ async def upload(
             content={"error": "min_speakers and max_speakers must be integers"},
         )
 
+    language = (language or "").strip().lower()
+    if language not in ALLOWED_LANGUAGES:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "Unsupported language code."},
+        )
+
     # Claim a capacity slot before reading the body. Checking after the upload
     # would mean a rejected request had already cost a full MAX_UPLOAD_MB of
     # bandwidth and disk -- which is exactly the resource the cap exists to
@@ -407,9 +443,15 @@ def progress(uuid: str):
             "status": _status_line(m, elapsed),
         }
     elif uuid in errors:
-        # No exception detail here: see the note on `errors`. The id is echoed
-        # so the user can quote it and an operator can find the logged trace.
-        return {"done": False, "state": "error", "status": GENERIC_ERROR, "error_id": uuid}
+        # Either a fixed message written in this file (input problems) or the
+        # generic one; never exception text. See the note on `errors`. The id is
+        # echoed so the user can quote it and an operator can find the trace.
+        return {
+            "done": False,
+            "state": "error",
+            "status": errors[uuid] or GENERIC_ERROR,
+            "error_id": uuid,
+        }
     else:
         index = 0
         with lock:
@@ -470,16 +512,23 @@ def process():
                 "elapsed": elapsed
             })
 
+        except AudioTooLong as e:
+            # The user's file is the problem, so say so plainly. The message is
+            # built in wp.py from configured limits and the probed duration --
+            # no exception text or path from an underlying library.
+            errors[audio_id] = str(e)
+            print(f"Rejected {audio_id}: {e}")
+
         except Exception:
             # Record only that this id failed; the diagnostic detail stays
             # server-side, keyed by the same id the client is shown.
-            errors.add(audio_id)
+            errors[audio_id] = None
             print(f"Error processing {audio_id}:")
             traceback.print_exc()
 
         finally:
             # The source audio is dead once transcription returns: it is read
-            # exactly once (whisperx.load_audio in wp.py) and nothing serves or
+            # exactly once (load_audio_bounded in wp.py) and nothing serves or
             # re-reads it afterwards -- only the transcript is downloadable.
             # Deleting it here rather than on a schedule keeps peak disk bounded
             # by the queue depth instead of by the cleanup interval, and keeps
