@@ -14,7 +14,7 @@ Fork of [one-among-us/whisper-web](https://github.com/one-among-us/whisper-web) 
 
 ## Diarisation
 
-The `min_speakers` / `max_speakers` upload fields are optional hints for diarisation. Omit them, leave them blank, or send `0` to let the model detect the speaker count itself. 
+The `min_speakers` / `max_speakers` Settings fields are optional hints for diarisation. Omit them, leave them blank, or send `0` to let the model detect the speaker count itself. 
 
 
 ## Multi-user model
@@ -30,7 +30,7 @@ Two limits keep one user from monopolising that queue. The whole service accepts
 
 ## Deployment
 
-Two containers: a frontend (nginx serving the built SPA) and a backend (FastAPI
+Suggested deployment as two containers on Kubernetes; a frontend (nginx serving the built SPA) and a backend (FastAPI)
 + WhisperX, needs an NVIDIA GPU).
  
 #### K8s notes
