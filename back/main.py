@@ -257,6 +257,12 @@ ALLOWED_LANGUAGES = {
     "yue",
 }
 
+# Whisper decoding tasks. "transcribe" keeps the source language; "translate"
+# is Whisper's built-in speech translation, which only ever targets English.
+# Validated for the same reason as the language codes above: an unrecognised
+# value reaches the model and degrades silently.
+ALLOWED_TASKS = {"transcribe", "translate"}
+
 # Extensions accepted for upload. The uploaded name is attacker-controlled and
 # is used to build a filesystem path, so only these exact values are ever
 # interpolated — never the raw client string.
@@ -420,6 +426,7 @@ class PendingProcess(NamedTuple):
     max_speakers: int | None = None
     initial_prompt: str = ""
     client: str = ""
+    task: str = "transcribe"
 
 
 def _total_jobs() -> int:
@@ -501,6 +508,7 @@ async def upload(
     min_speakers: str | None = Form(None),
     max_speakers: str | None = Form(None),
     initial_prompt: str = Form(""),
+    task: str = Form("transcribe"),
 ):
     # Validate the filename before touching the disk. Only the allowlisted
     # extension is ever used to build the path; the rest of the client-supplied
@@ -538,6 +546,13 @@ async def upload(
         return JSONResponse(
             status_code=400,
             content={"error": "Unsupported language code."},
+        )
+
+    task = (task or "").strip().lower()
+    if task not in ALLOWED_TASKS:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "Unsupported task."},
         )
 
     # Claim a capacity slot before reading the body. Checking after the upload
@@ -623,7 +638,7 @@ async def upload(
         # Hand the reservation over to the queue entry in one step.
         _commit_reservation(PendingProcess(
             audio_id, fp, language, do_diarize, min_spk, max_spk,
-            initial_prompt.strip(), client,
+            initial_prompt.strip(), client, task,
         ))
         committed = True
 
@@ -716,7 +731,7 @@ def process():
                 min_speakers=pending.min_speakers,
                 max_speakers=pending.max_speakers,
                 initial_prompt=pending.initial_prompt,
-                task="transcribe",
+                task=pending.task,
             )
 
             # Write to file

@@ -10,6 +10,14 @@ Fork of [one-among-us/whisper-web](https://github.com/one-among-us/whisper-web) 
 
 * Speech-to-text with timestamps
 * Speaker diarisation
+* Translation to English
+
+
+## Transcribe vs Translate
+
+The Mode setting picks what Whisper does with the audio. **Transcribe** (the default) writes the speech down in the language it was spoken in. **Translate** uses Whisper's built-in speech translation, which only ever outputs English — there is no way to target another language, and selecting it with an English source does nothing.
+
+Translation quality is lower than transcription, and lower than running a dedicated translation model over a transcript. Timestamps and diarisation still work in either mode.
 
 
 ## Diarisation

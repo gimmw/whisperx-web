@@ -169,8 +169,17 @@ def diarized_transcribe(
     wx_model.options.initial_prompt = initial_prompt or None
     lang_arg = None if language == "auto" else language
     result = wx_model.transcribe(audio, batch_size=BATCH_SIZE, task=task, language=lang_arg)
-    lang = result.get("language", language if language != "auto" else "en")
     transcribe_elapsed = time.time() - t0
+
+    # `result["language"]` is always the *source* language, whatever the task.
+    # Under "translate" the segment text has already been rendered into English,
+    # so aligning it against the source language's wav2vec2 model would score
+    # English words with the wrong phoneme set — silently bad timestamps rather
+    # than a clean failure. Align against English instead.
+    if task == "translate":
+        lang = "en"
+    else:
+        lang = result.get("language", language if language != "auto" else "en")
 
     # 2. Align (phoneme-level timestamps via wav2vec2)
     #    Skip if no alignment model exists for the detected language —

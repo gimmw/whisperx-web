@@ -11,6 +11,7 @@
     let maxSpeakers: number | null = null
     let initialPrompt = ""
     let language = "en"
+    let task: 'transcribe' | 'translate' = "transcribe"
 
     const languages: [string, string][] = [
         ["auto", "Autodetect"],
@@ -179,6 +180,7 @@
     // a stale non-default (say, the wrong language from a previous upload)
     // invisible at the moment it matters, which this guards against.
     $: activeSettings = [
+        task === 'translate' ? 'translate' : null,
         language !== 'en' ? (languages.find(([c]) => c === language)?.[1] ?? language) : null,
         !enableDiarization ? 'no diarisation' : null,
         enableDiarization && (minSpeakers || maxSpeakers) ? 'speaker range' : null,
@@ -222,6 +224,7 @@
         let formData = new FormData()
         formData.append('file', file)
         formData.append('language', language)
+        formData.append('task', task)
         formData.append('diarize', enableDiarization ? 'true' : 'false')
         if (enableDiarization && minSpeakers != null)
             formData.append('min_speakers', String(minSpeakers))
@@ -368,13 +371,31 @@
 
         <div class="options">
             <label class="option-label">
-                Language
+                Mode
+                <select bind:value={task}>
+                    <option value="transcribe">Transcribe</option>
+                    <option value="translate">Translate (to English)</option>
+                </select>
+            </label>
+
+            <label class="option-label">
+                {task === 'translate' ? 'Source language' : 'Language'}
                 <select bind:value={language}>
                     {#each languages as [code, name]}
                         <option value={code}>{name}</option>
                     {/each}
                 </select>
             </label>
+
+            <!-- Whisper's translate task only ever targets English, so an
+                 English source is a no-op. Saying so beats silently returning
+                 an ordinary transcript the user thinks was translated. -->
+            {#if task === 'translate' && language === 'en'}
+                <p class="option-hint">
+                    Source language is English, so there is nothing to translate.
+                    Pick the spoken language (or Autodetect) above.
+                </p>
+            {/if}
 
             <label class="toggle">
                 <input type="checkbox" bind:checked={enableDiarization} />
@@ -630,6 +651,12 @@
     select option
       background: #242424
       color: white
+
+    .option-hint
+      margin: -0.25rem 0 0
+      font-size: 0.75rem
+      line-height: 1.4
+      color: rgba(white, 0.6)
 
     .toggle
       display: flex
