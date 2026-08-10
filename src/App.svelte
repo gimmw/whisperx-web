@@ -19,7 +19,7 @@
           <Icon icon="mdi:help-circle-outline" width="28" height="28" />
         </a>
       {/if}
-      <a class="header-link" href="https://github.com/gimmw/whisperx-web" target="_blank" rel="noopener noreferrer" aria-label="GitHub repository">
+      <a class="header-link" href="https://github.com/gimmw/whisperx-web" target="_blank" rel="noopener noreferrer" aria-label="GitHub repository" title="source code repository on GitHub">
         <Icon icon="mdi:github" width="28" height="28" />
       </a>
     </div>
