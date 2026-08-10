@@ -11,7 +11,8 @@ set -e
 cat <<EOF > /usr/share/nginx/html/env.js
 window.__ENV__ = {
   BACKEND_HOST: "${BACKEND_HOST:-/api}",
-  TITLE: "${TITLE:-}"
+  TITLE: "${TITLE:-}",
+  HELP_URL: "${HELP_URL:-}"
 };
 EOF
 

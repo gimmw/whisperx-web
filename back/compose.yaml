@@ -60,6 +60,8 @@ services:
       # browser at an absolute backend URL, which reintroduces CORS.
       - BACKEND_HOST=${BACKEND_HOST:-/api}
       - TITLE=${TITLE:-}
+      # Optional external help page. Blank hides the header's help icon.
+      - HELP_URL=${HELP_URL:-}
     depends_on:
       - whisper-back
 

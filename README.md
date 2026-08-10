@@ -91,6 +91,8 @@ Frontend:
   requests cross-origin, so the backend's `CORS_ORIGINS` must then list this
   frontend's origin.
 * `TITLE` - optional header title
+* `HELP_URL` - optional external URL for the header's help icon. Leave unset or
+  blank to hide the icon.
 
 Backend:
 * `HF_TOKEN` - huggingface api token

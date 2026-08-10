@@ -19,3 +19,8 @@ export const HOST: string = (configured || "/api").replace(/\/+$/, "");
 
 export const TITLE: string =
   (window as any).__ENV__?.TITLE ?? "";
+
+// Optional external help/documentation link. Blank (or unset, which substitutes
+// as "") hides the header's help icon entirely.
+export const HELP_URL: string =
+  ((window as any).__ENV__?.HELP_URL ?? "").trim();
