@@ -38,7 +38,7 @@
     margin: 0;
     font-size: 1.5rem;
     font-weight: 600;
-    color: rgba(255, 255, 255, 0.87);
+    color: var(--c-text);
     pointer-events: none;
   }
 
@@ -54,11 +54,11 @@
 
   .header-link {
     display: inline-flex;
-    color: rgba(255, 255, 255, 0.6);
+    color: var(--c-text-muted);
     transition: color 0.2s ease;
   }
 
   .header-link:hover {
-    color: rgba(255, 255, 255, 0.95);
+    color: var(--c-text-strong);
   }
 </style>

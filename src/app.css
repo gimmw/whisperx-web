@@ -1,11 +1,72 @@
+/* ---------------------------------------------------------------------------
+ * Theme tokens.
+ *
+ * Every colour in the app resolves through one of these custom properties, so
+ * a scheme is defined in exactly one place. The :root block is the dark theme
+ * (the design the app was built around); the prefers-color-scheme block at the
+ * bottom re-points the same names at light values.
+ *
+ * Rules of thumb when adding to this list:
+ *   - Name by role ("--c-surface"), not by appearance ("--c-grey-800"), so the
+ *     light override can pick a value that is nothing like the dark one.
+ *   - Tints over the accent get their own token rather than being computed at
+ *     the use site: the light accent is a different hue and darkness from the
+ *     dark one, so a single alpha does not translate between the two.
+ * ------------------------------------------------------------------------ */
 :root {
   font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
   line-height: 1.5;
   font-weight: 400;
 
+  /* Lets the browser theme native controls (checkbox, number spinners, the
+     select popup) to match. Without it those stay dark on a light page. */
   color-scheme: light dark;
-  color: rgba(255, 255, 255, 0.87);
-  background-color: #242424;
+
+  /* Page */
+  --c-bg: #242424;
+  --c-text: rgba(255, 255, 255, 0.87);
+  --c-text-strong: #ffffff;
+  --c-text-muted: rgba(255, 255, 255, 0.6);
+  --c-text-faint: rgba(255, 255, 255, 0.4);
+
+  /* Accent. --c-on-emp is whatever stays legible on top of a solid --c-emp
+     fill, so it is not simply "white" in every theme. */
+  --c-emp: #86a2ff;
+  --c-on-emp: #ffffff;
+  --c-emp-tint: rgba(134, 162, 255, 0.12);
+  --c-emp-tint-strong: rgba(134, 162, 255, 0.18);
+
+  --c-error: #ff8e8e;
+
+  /* Surfaces layered over the page background */
+  --c-surface: rgba(255, 255, 255, 0.06);
+  --c-surface-hover: rgba(255, 255, 255, 0.1);
+  --c-surface-raised: rgba(255, 255, 255, 0.08);
+  --c-border: rgba(255, 255, 255, 0.25);
+
+  /* Modal */
+  --c-panel-bg: #1e1e1e;
+  --c-panel-border: rgba(255, 255, 255, 0.15);
+  --c-backdrop: rgba(0, 0, 0, 0.5);
+  --c-shadow: rgba(0, 0, 0, 0.4);
+  --c-shadow-lg: rgba(0, 0, 0, 0.5);
+
+  /* Form controls */
+  --c-field-bg: rgba(255, 255, 255, 0.1);
+  --c-field-border: rgba(255, 255, 255, 0.3);
+  --c-option-bg: #242424;
+
+  /* Speaker labels on the transcript */
+  --c-speaker: #ff9595;
+  --c-speaker-0: #59ffa1;
+  --c-speaker-1: #597aff;
+
+  --c-link: #646cff;
+  --c-link-hover: #535bf2;
+  --c-button-bg: #1a1a1a;
+
+  color: var(--c-text);
+  background-color: var(--c-bg);
 
   font-synthesis: none;
   text-rendering: optimizeLegibility;
@@ -15,11 +76,11 @@
 
 a {
   font-weight: 500;
-  color: #646cff;
+  color: var(--c-link);
   text-decoration: inherit;
 }
 a:hover {
-  color: #535bf2;
+  color: var(--c-link-hover);
 }
 
 body {
@@ -28,6 +89,10 @@ body {
   place-items: center;
   min-width: 320px;
   min-height: 100vh;
+  /* body does not inherit the :root background in every engine, and the app
+     paints no full-page surface of its own. */
+  background-color: var(--c-bg);
+  color: var(--c-text);
 }
 
 h1 {
@@ -53,27 +118,74 @@ button {
   font-size: 1em;
   font-weight: 500;
   font-family: inherit;
-  background-color: #1a1a1a;
+  background-color: var(--c-button-bg);
+  color: var(--c-text);
   cursor: pointer;
   transition: border-color 0.25s;
 }
 button:hover {
-  border-color: #646cff;
+  border-color: var(--c-link);
 }
 button:focus,
 button:focus-visible {
   outline: 4px auto -webkit-focus-ring-color;
 }
 
+/* ---------------------------------------------------------------------------
+ * Light theme.
+ *
+ * The accent is not the dark theme's #86a2ff: that colour sits at roughly
+ * 2.2:1 against white, below the 4.5:1 WCAG AA threshold for text and the 3:1
+ * threshold for UI boundaries. #3b5bdb is the same family at ~5.7:1, so accent
+ * text and the dashed drop-area border stay legible. The error and speaker
+ * colours are darkened for the same reason.
+ * ------------------------------------------------------------------------ */
 @media (prefers-color-scheme: light) {
   :root {
-    color: #213547;
-    background-color: #ffffff;
-  }
-  a:hover {
-    color: #747bff;
-  }
-  button {
-    background-color: #f9f9f9;
+    --c-bg: #ffffff;
+    --c-text: #213547;
+    --c-text-strong: #0f1b26;
+    --c-text-muted: rgba(33, 53, 71, 0.68);
+    /* Drives input placeholders, which are real text and so want 4.5:1. The
+       dark theme's 0.4 maps to only 2.5:1 here; 0.7 gives 5.0:1 while still
+       reading as secondary to the 12.6:1 value text. */
+    --c-text-faint: rgba(33, 53, 71, 0.7);
+
+    --c-emp: #3b5bdb;
+    --c-on-emp: #ffffff;
+    --c-emp-tint: rgba(59, 91, 219, 0.1);
+    --c-emp-tint-strong: rgba(59, 91, 219, 0.16);
+
+    --c-error: #c92a2a;
+
+    --c-surface: rgba(15, 27, 38, 0.04);
+    --c-surface-hover: rgba(15, 27, 38, 0.08);
+    --c-surface-raised: rgba(15, 27, 38, 0.05);
+    /* 0.5, not the 0.25 the dark theme uses. A translucent dark border over
+       white loses contrast far faster than a translucent white one over
+       #242424: at 0.25 this renders 1.7:1 against the page, under the 3:1
+       WCAG 1.4.11 minimum for control boundaries, which is what made the
+       Settings button hard to pick out. 0.5 gives 3.4:1. */
+    --c-border: rgba(15, 27, 38, 0.5);
+
+    --c-panel-bg: #ffffff;
+    --c-panel-border: rgba(15, 27, 38, 0.14);
+    --c-backdrop: rgba(15, 27, 38, 0.35);
+    --c-shadow: rgba(15, 27, 38, 0.2);
+    --c-shadow-lg: rgba(15, 27, 38, 0.25);
+
+    --c-field-bg: #ffffff;
+    /* Same reasoning as --c-border: 0.3 over white is only 1.9:1, so the
+       select/text/number inputs would read as borderless. */
+    --c-field-border: rgba(15, 27, 38, 0.5);
+    --c-option-bg: #ffffff;
+
+    --c-speaker: #c92a2a;
+    --c-speaker-0: #0b7a43;
+    --c-speaker-1: #2f4fd8;
+
+    --c-link: #3b5bdb;
+    --c-link-hover: #2f4fd8;
+    --c-button-bg: #f9f9f9;
   }
 }
