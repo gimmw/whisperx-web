@@ -423,7 +423,7 @@
             <h2 class="confirm-title" id="confirm-title">Delete this transcript?</h2>
             <p class="confirm-body" id="confirm-body">
                 The transcript is deleted from the server immediately and cannot be
-                recovered — this link will stop working for anyone who has it. Any
+                recovered. This link will stop working for anyone who has it. Any
                 copy already downloaded to your device is unaffected.
             </p>
 
