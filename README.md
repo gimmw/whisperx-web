@@ -27,13 +27,17 @@ The `min_speakers` / `max_speakers` Settings fields are optional hints for diari
 
 ## Multi-user model
 
-This service does not use accounts or passwords. Each uploaded file is assigned a random, unguessable link (UUID) that is used to check progress and download the transcript — Anyone who has that link can access the results, so it should be treated like a private URL and not shared. 
+This service does not use accounts or passwords. Each uploaded file is assigned a random, unguessable link (UUID) that is used to check progress and download the transcript. Anyone who has that link can access the results, so it should be treated like a private URL and not shared. 
 
-There is no way for other users to browse, list, or guess another user's files under normal circumstances, and the original audio file is never exposed for download; only the transcript is. The uploaded audio is deleted as soon as transcription finishes — successfully or not — so recordings are not kept on disk after the job that needed them. Transcripts are kept, and their retention is up to the operator (see below). 
+There is no way for other users to browse, list, or guess another user's files under normal circumstances, and the original audio file is never exposed for download; only the transcript is. The uploaded audio is deleted as soon as transcription finishes -successfully or not- so recordings are not kept on disk after the job that needed them. Transcripts are kept until the operator's retention window expires them (see below), or until someone deletes one explicitly.
 
-Uploads are processed one at a time in a first-in, first-out queue — If you upload while another job is running, your file waits its turn, and the progress page shows your position in the queue along with live CPU/GPU usage once your file starts processing. 
+The result page has a **Delete transcript** button that removes it from the server straight away, ahead of that schedule. The deletion is permanent and applies to everyone: the link stops working for anyone holding it, including the person who created it.
 
-Two limits keep one user from monopolising that queue. The whole service accepts `MAX_QUEUE_DEPTH` jobs at once (uploads beyond that are refused until a slot frees), and any single user may have `MAX_JOBS_PER_CLIENT` jobs queued or running at once. Both are refused at upload time with an explanatory message, and both clear themselves as jobs finish — there is no lasting penalty.
+Because the link is the only credential, anyone with it can delete the transcript as well as read it. That is the same trust boundary as sharing the link at all; there is no separate owner to check against.
+
+Uploads are processed one at a time in a first-in, first-out queue. If you upload while another job is running, your file waits its turn, and the progress page shows your position in the queue along with live CPU/GPU usage once your file starts processing. 
+
+Two limits keep one user from monopolising that queue. The whole service accepts `MAX_QUEUE_DEPTH` jobs at once (uploads beyond that are refused until a slot frees), and any single user may have `MAX_JOBS_PER_CLIENT` jobs queued or running at once. Both are refused at upload time with an explanatory message, and both clear themselves as jobs finish; There is no lasting penalty.
 
 
 ## Deployment
@@ -49,7 +53,7 @@ Suggested deployment as two containers on Kubernetes; a frontend (nginx serving 
 * Transcription is slow. Raise the Ingress read/send timeouts (e.g.
   `proxy-read-timeout: "3600"`) so long jobs are not cut off.
 * The backend needs `nvidia.com/gpu` in its resource limits and writable storage
-  at `/ws/tmp-whisper` — use a PVC, since results are lost on pod restart
+  at `/ws/tmp-whisper`. Use a PVC, since results are lost on pod restart
   otherwise. Uploads are processed one at a time, so run a single replica.
 * `MAX_JOBS_PER_CLIENT` identifies users by the `X-Real-IP` header the proxy
   sets. Keep the backend reachable only through that proxy: if it is exposed
@@ -58,7 +62,7 @@ Suggested deployment as two containers on Kubernetes; a frontend (nginx serving 
   above and reset on restart.
 * The upload rate/concurrency limits in `front/nginx.conf` key on
   `$remote_addr`. Behind an Ingress or CDN that is the *proxy's* address, so
-  every user collapses into one key and the limits apply globally — one user's
+  every user collapses into one key and the limits apply globally. One user's
   uploads would then block everyone. Uncomment the `set_real_ip_from` /
   `real_ip_header` lines in that file and set them to the trusted proxy range.
   The same applies to the `X-Real-IP` the backend uses. These limits are also
@@ -68,18 +72,20 @@ Suggested deployment as two containers on Kubernetes; a frontend (nginx serving 
 
 `/ws/tmp-whisper` holds two directories with different lifecycles:
 
-* `audio/` — uploads, up to `MAX_UPLOAD_MB` each. Deleted by the app as soon as
+* `audio/` - uploads, up to `MAX_UPLOAD_MB` each. Deleted by the app as soon as
   the job finishes, so peak usage is bounded by the queue depth rather than by
   total traffic. No cleanup job is needed for these; a periodic sweep of files
   older than a day or so is still worth having as a backstop for uploads
   orphaned by a pod crash mid-job, but it should normally find nothing.
-* `transcription/` — the JSON results, a few KB each. These are the product and
-  are never deleted by the app, so they grow without bound. Expire them on
-  whatever schedule suits; note that doing so breaks the UUID link for anyone
-  who bookmarked it, since the page re-fetches the transcript from the server on
-  every load.
+* `transcription/` - the JSON results, a few KB each. These are the product, and
+  the app only deletes one when a user presses the Delete button on the result
+  page, so they otherwise grow without bound. Expire them on whatever schedule
+  suits; note that doing so breaks the UUID link for anyone who bookmarked it,
+  since the page re-fetches the transcript from the server on every load. An
+  expired or deleted link shows "This transcript is no longer available" rather
+  than failing silently.
 
-`k8s/cleanup-cronjob.yaml` is a starting point covering both — check the PVC
+`k8s/cleanup-cronjob.yaml` is a starting point covering both. Check the PVC
 name, namespace, schedule and retention window before applying.
 
 

@@ -32,7 +32,7 @@
     export let id: string;
     let progress = '';
     let isDone = false;
-    let state: 'queued' | 'processing' | 'error' | '' = '';
+    let state: 'queued' | 'processing' | 'error' | 'unknown' | '' = '';
     let queuePosition = 0;
     let elapsed = 0;
     let metrics: Metrics | null = null;
@@ -124,6 +124,13 @@
             elapsed = data.elapsed ?? 0;
             metrics = data.metrics ?? null;
             progress = data.status ?? '';
+
+            // "unknown" is terminal: the server has no record of this id
+            // (deleted, expired, or lost to a restart), and nothing it can do
+            // will produce one, so polling would only spin forever. Every
+            // other state can still change, so keep polling those.
+            if (state === 'unknown') return;
+
             if (!cancelled) timer = setTimeout(checkProgress, 1000);
         }
     }
@@ -165,6 +172,118 @@
         localStorage.setItem('optTimestamps', optTimestamps.toString())
         downloadResults()
     }
+
+    // ---------------------------------------------------------------------
+    // Delete on request.
+    //
+    // The transcript is otherwise kept until the operator's retention sweep
+    // runs (see k8s/cleanup-cronjob.yaml), which can be days. This gives the
+    // user the same outcome immediately.
+    //
+    // Confirmation is a real dialog rather than window.confirm(): confirm()
+    // blocks the event loop, which would freeze the poll timer, and its
+    // wording cannot say what is actually being destroyed or that it cannot be
+    // undone.
+    // ---------------------------------------------------------------------
+    let confirmOpen = false;
+    let deleting = false;
+    let deleteError = '';
+    let confirmEl: HTMLDivElement | null = null;
+    let deleteBtnEl: HTMLButtonElement | null = null;
+
+    function openConfirm() {
+        deleteError = '';
+        confirmOpen = true;
+    }
+
+    function closeConfirm() {
+        // A delete in flight has already left the browser; letting the dialog
+        // close would leave the user looking at a transcript that is being
+        // removed underneath them.
+        if (deleting) return;
+        confirmOpen = false;
+        // Without this, focus is dropped to the top of the document when the
+        // dialog unmounts.
+        deleteBtnEl?.focus();
+    }
+
+    function onConfirmKeydown(e: KeyboardEvent) {
+        if (e.key === 'Escape') {
+            e.stopPropagation();
+            closeConfirm();
+            return;
+        }
+
+        // Focus trap, same reasoning as the settings panel in Home.svelte: the
+        // backdrop hides where focus has gone if Tab escapes behind it.
+        if (e.key !== 'Tab' || !confirmEl) return;
+
+        const focusable = Array.from(
+            confirmEl.querySelectorAll<HTMLElement>('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])')
+        ).filter(el => !el.hasAttribute('disabled'));
+        if (focusable.length === 0) return;
+
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        const active = document.activeElement;
+
+        if (e.shiftKey && active === first) {
+            e.preventDefault();
+            last.focus();
+        } else if (!e.shiftKey && active === last) {
+            e.preventDefault();
+            first.focus();
+        }
+    }
+
+    // Focus the cancel button, not delete: the destructive action should never
+    // be one stray Enter away.
+    $: if (confirmOpen && confirmEl) {
+        queueMicrotask(() => confirmEl?.querySelector<HTMLElement>('.cancel-btn')?.focus());
+    }
+
+    async function confirmDelete() {
+        deleting = true;
+        deleteError = '';
+
+        let resp: Response;
+        try {
+            resp = await fetch(`${HOST}/transcript/${id}`, { method: 'DELETE' });
+        } catch (e) {
+            console.error('Delete failed', e);
+            deleteError = 'Delete failed. Please check your connection and try again.';
+            deleting = false;
+            return;
+        }
+
+        // 404 means it is already gone -- a double submit, or the retention
+        // sweep got there first. The user asked for it to not exist, and it
+        // does not, so treat that as success rather than an error they can do
+        // nothing about.
+        if (!resp.ok && resp.status !== 404) {
+            let message = 'Could not delete the transcript. Please try again.';
+            try {
+                const body = await resp.json();
+                if (body?.error) message = body.error;
+            } catch {
+                // Non-JSON body (a proxy error page); keep the default.
+            }
+            deleteError = message;
+            deleting = false;
+            return;
+        }
+
+        // Stop polling before leaving: the transcript is gone, so the next
+        // /progress call would come back "unknown" and flip the page to "no
+        // longer available" in the moment before the navigation commits.
+        cancelled = true;
+        if (timer !== null) clearTimeout(timer);
+
+        // A full load rather than client-side navigation, matching how Home
+        // sends the user here, and guaranteeing no deleted transcript is left
+        // in component state.
+        window.location.href = '/';
+    }
 </script>
 
 <main>
@@ -180,11 +299,30 @@
     <h1>Transcription Progress</h1>
     {#if isDone && result}
         <p>Transcription complete ({result.elapsed[0].toFixed(1)}s + {result.elapsed[1].toFixed(1)}s). Your file will download shortly.</p>
-        <label>
-            <input type="checkbox" bind:checked={optTimestamps} on:change={changeTimestamps} />
-            Download with timestamps
-        </label>
-        
+
+        <!-- The delete control sits with the download option rather than below
+             the transcript: a long transcript would put it several screens
+             down, where a user who wants the text gone would have to scroll
+             through all of it to get rid of it. -->
+        <div class="result-actions">
+            <label class="timestamps-toggle">
+                <input type="checkbox" bind:checked={optTimestamps} on:change={changeTimestamps} />
+                Download with timestamps
+            </label>
+
+            <button
+                type="button"
+                class="delete-btn"
+                bind:this={deleteBtnEl}
+                on:click={openConfirm}
+                aria-haspopup="dialog"
+                aria-expanded={confirmOpen}
+            >
+                <Icon icon="tabler:trash" width="18" height="18" />
+                Delete transcript
+            </button>
+        </div>
+
         <div class="blocks">
             {#each blocks as block}
                 <div class="block">
@@ -198,6 +336,12 @@
                 </div>
             {/each}
         </div>
+    {:else if state === 'unknown'}
+        <p class="status-line">{progress || 'This transcript is no longer available.'}</p>
+        <p class="unknown-hint">
+            It may have been deleted, or removed by the server's retention policy.
+            Transcripts cannot be recovered once they are gone.
+        </p>
     {:else if state === 'error'}
         <p class="error-line">{progress || 'Transcription failed.'}</p>
         <p class="error-id">ID: <code>{id}</code></p>
@@ -250,6 +394,58 @@
             <p class="poll-error">Connection issue &mdash; retrying ({pollError})</p>
         {/if}
     {/if}
+
+    <!-- Confirmation for the destructive action. Mounted conditionally rather
+         than kept hidden, so its controls are never in the tab order of the
+         page behind it. -->
+    {#if confirmOpen}
+        <!-- Backdrop as a <button> so dismissal works without a pointer; the
+             Cancel control in the dialog serves the same purpose, so this one
+             is hidden from assistive tech to avoid announcing it twice. -->
+        <button
+            type="button"
+            class="confirm-backdrop"
+            on:click={closeConfirm}
+            tabindex="-1"
+            aria-hidden="true"
+        ></button>
+
+        <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
+        <div
+            class="confirm-dialog"
+            bind:this={confirmEl}
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="confirm-title"
+            aria-describedby="confirm-body"
+            on:keydown={onConfirmKeydown}
+        >
+            <h2 class="confirm-title" id="confirm-title">Delete this transcript?</h2>
+            <p class="confirm-body" id="confirm-body">
+                The transcript is deleted from the server immediately and cannot be
+                recovered. This link will stop working for anyone who has it. Any
+                copy already downloaded to your device is unaffected.
+            </p>
+
+            <!-- Inside the dialog, not on the page behind it: the backdrop
+                 covers the page, so an error rendered there is dimmed and
+                 partly obscured at the moment the user most needs to read it.
+                 Keeping it here also puts it next to the button they would
+                 press to retry. -->
+            {#if deleteError}
+                <p class="confirm-error" role="alert">{deleteError}</p>
+            {/if}
+
+            <div class="confirm-actions">
+                <button type="button" class="cancel-btn" on:click={closeConfirm} disabled={deleting}>
+                    Cancel
+                </button>
+                <button type="button" class="destructive-btn" on:click={confirmDelete} disabled={deleting}>
+                    {deleting ? 'Deleting…' : 'Delete'}
+                </button>
+            </div>
+        </div>
+    {/if}
 </main>
 
 <style lang="sass">
@@ -271,6 +467,148 @@
 
     .status-line
       opacity: 0.85
+
+    // Download option and delete, on one row where there is width for it.
+    // Wraps rather than shrinking: "Download with timestamps" and "Delete
+    // transcript" both become unreadable if truncated.
+    .result-actions
+      display: flex
+      flex-wrap: wrap
+      align-items: center
+      justify-content: center
+      gap: 0.75rem 1.25rem
+      margin: 0.5rem 0 1.25rem
+
+      .timestamps-toggle
+        display: inline-flex
+        align-items: center
+        gap: 0.5rem
+        cursor: pointer
+        // 44px minimum touch target (WCAG 2.5.5 / iOS HIG), matching the
+        // controls in Home.svelte.
+        min-height: 44px
+
+        input[type="checkbox"]
+          width: 1.15rem
+          height: 1.15rem
+          cursor: pointer
+
+    // Outlined rather than a solid red fill. This is a secondary action on a
+    // page whose purpose is the transcript, so it should be unmistakably
+    // destructive without competing with the content for attention; the solid
+    // fill is saved for the confirm button, where destruction is the point of
+    // the dialog.
+    //
+    // Colour is not the only signal: the label says "Delete" and the icon is a
+    // bin, so the meaning survives for users who cannot distinguish red.
+    .delete-btn
+      display: inline-flex
+      align-items: center
+      gap: 0.4rem
+      padding: 0.5rem 0.9rem
+      min-height: 44px
+      border-radius: 999px
+      border: 1px solid var(--c-danger)
+      background: transparent
+      color: var(--c-danger)
+      font-size: 0.9rem
+      font-family: inherit
+      cursor: pointer
+
+      &:hover
+        background: var(--c-danger-tint)
+        border-color: var(--c-danger-hover)
+        color: var(--c-danger-hover)
+
+    .confirm-backdrop
+      display: block
+      position: fixed
+      inset: 0
+      z-index: 199
+      // Reset the <button> defaults; this is a bare hit target.
+      border: none
+      padding: 0
+      background: var(--c-backdrop)
+      cursor: default
+
+    .confirm-dialog
+      position: fixed
+      z-index: 200
+      box-sizing: border-box
+      left: 50%
+      top: 50%
+      // #{} so Sass emits calc() verbatim: it otherwise folds this into the
+      // invalid "min(26rem, 100vw - 2rem)", which browsers drop entirely.
+      // Same trap as the settings panel in Home.svelte.
+      width: #{"min(26rem, calc(100vw - 2rem))"}
+      transform: translate(-50%, -50%)
+      text-align: left
+
+      background: var(--c-panel-bg)
+      border: 1px solid var(--c-panel-border)
+      border-radius: 1rem
+      padding: 1.25rem
+      box-shadow: 0 10px 40px var(--c-shadow-lg)
+
+      .confirm-title
+        margin: 0 0 0.5rem
+        font-size: 1.1rem
+        font-weight: 600
+        color: var(--c-text-strong)
+
+      .confirm-body
+        margin: 0 0 1.25rem
+        font-size: 0.9rem
+        line-height: 1.5
+        color: var(--c-text-muted)
+
+      .confirm-error
+        margin: 0 0 1rem
+        font-size: 0.85rem
+        line-height: 1.4
+        color: var(--c-error)
+
+      .confirm-actions
+        display: flex
+        justify-content: flex-end
+        gap: 0.75rem
+
+        button
+          min-height: 44px
+          padding: 0.5rem 1.1rem
+          border-radius: 0.5rem
+          font-size: 0.95rem
+          font-family: inherit
+          cursor: pointer
+
+          &:disabled
+            opacity: 0.6
+            cursor: default
+
+        // Cancel is the resting focus target, so it is the plain one.
+        .cancel-btn
+          border: 1px solid var(--c-border)
+          background: var(--c-surface-raised)
+          color: var(--c-text)
+
+          &:hover:not(:disabled)
+            border-color: var(--c-text-strong)
+            color: var(--c-text-strong)
+
+        .destructive-btn
+          border: 1px solid transparent
+          background: var(--c-danger)
+          color: var(--c-on-danger)
+          font-weight: 600
+
+          &:hover:not(:disabled)
+            background: var(--c-danger-hover)
+
+          &:focus-visible
+            // The button is a solid fill, so the ring must contrast with that
+            // fill rather than with the page.
+            outline: 2px solid var(--c-text-strong)
+            outline-offset: 2px
 
     .metrics
       display: flex
@@ -307,6 +645,10 @@
       font-size: 0.85em
       color: var(--c-error)
       opacity: 0.8
+
+    .unknown-hint
+      font-size: 0.85em
+      color: var(--c-text-muted)
 
     .error-line
       color: var(--c-error)
