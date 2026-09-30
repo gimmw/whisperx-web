@@ -29,7 +29,11 @@ The `min_speakers` / `max_speakers` Settings fields are optional hints for diari
 
 This service does not use accounts or passwords. Each uploaded file is assigned a random, unguessable link (UUID) that is used to check progress and download the transcript — Anyone who has that link can access the results, so it should be treated like a private URL and not shared. 
 
-There is no way for other users to browse, list, or guess another user's files under normal circumstances, and the original audio file is never exposed for download; only the transcript is. The uploaded audio is deleted as soon as transcription finishes — successfully or not — so recordings are not kept on disk after the job that needed them. Transcripts are kept, and their retention is up to the operator (see below). 
+There is no way for other users to browse, list, or guess another user's files under normal circumstances, and the original audio file is never exposed for download; only the transcript is. The uploaded audio is deleted as soon as transcription finishes — successfully or not — so recordings are not kept on disk after the job that needed them. Transcripts are kept until the operator's retention window expires them (see below), or until someone deletes one explicitly.
+
+The result page has a **Delete transcript** button that removes it from the server straight away, ahead of that schedule. It asks for confirmation first, then deletes and returns to the upload page. The deletion is permanent and applies to everyone: the link stops working for anyone holding it, including the person who created it. A transcript already downloaded to a device is not affected — only the server's copy is removed.
+
+Because the link is the only credential, anyone with it can delete the transcript as well as read it. That is the same trust boundary as sharing the link at all; there is no separate owner to check against.
 
 Uploads are processed one at a time in a first-in, first-out queue — If you upload while another job is running, your file waits its turn, and the progress page shows your position in the queue along with live CPU/GPU usage once your file starts processing. 
 
@@ -73,11 +77,13 @@ Suggested deployment as two containers on Kubernetes; a frontend (nginx serving 
   total traffic. No cleanup job is needed for these; a periodic sweep of files
   older than a day or so is still worth having as a backstop for uploads
   orphaned by a pod crash mid-job, but it should normally find nothing.
-* `transcription/` — the JSON results, a few KB each. These are the product and
-  are never deleted by the app, so they grow without bound. Expire them on
-  whatever schedule suits; note that doing so breaks the UUID link for anyone
-  who bookmarked it, since the page re-fetches the transcript from the server on
-  every load.
+* `transcription/` — the JSON results, a few KB each. These are the product, and
+  the app only deletes one when a user presses the Delete button on the result
+  page, so they otherwise grow without bound. Expire them on whatever schedule
+  suits; note that doing so breaks the UUID link for anyone who bookmarked it,
+  since the page re-fetches the transcript from the server on every load. An
+  expired or deleted link shows "This transcript is no longer available" rather
+  than failing silently.
 
 `k8s/cleanup-cronjob.yaml` is a starting point covering both — check the PVC
 name, namespace, schedule and retention window before applying.

@@ -159,7 +159,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOW_ORIGINS,
     allow_credentials=False,
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -293,6 +293,30 @@ def _safe_extension(filename: str | None) -> str | None:
 
     ext = base.rsplit(".", 1)[-1].lower()
     return ext if ext in ALLOWED_EXTENSIONS else None
+
+
+def _transcript_path(audio_id: str) -> Path | None:
+    """Resolve a client-supplied id to its transcript file, or None if invalid.
+
+    The id reaches us straight from the URL, and every caller interpolates it
+    into a filesystem path. Ids are only ever produced by uuid.uuid4() (see
+    upload()), so anything that is not a canonical UUID cannot name a real
+    transcript and is rejected without touching the disk. That also rules out
+    "..", separators and NUL by construction -- uuid.UUID() accepts none of
+    them -- which matters most for delete(), where a traversal would be a
+    write.
+
+    str(UUID(...)) rather than the raw input: uuid.UUID is lenient about case,
+    braces and urn: prefixes, so the round-trip normalises those spellings onto
+    the one form the file was actually written under, instead of building a
+    path from a variant that will never match.
+    """
+    try:
+        canonical = str(uuid.UUID(audio_id))
+    except (ValueError, AttributeError, TypeError):
+        return None
+
+    return DATA_DIR / "transcription" / f"{canonical}.json"
 
 
 class SpeakerCountError(ValueError):
@@ -650,7 +674,8 @@ async def upload(
 
 @app.get("/progress/{uuid}")
 def progress(uuid: str):
-    if Path(DATA_DIR / "transcription" / f"{uuid}.json").exists():
+    path = _transcript_path(uuid)
+    if path is not None and path.exists():
         return {"done": True}
 
     with lock:
@@ -680,19 +705,98 @@ def progress(uuid: str):
             "status": errors[uuid] or GENERIC_ERROR,
             "error_id": uuid,
         }
-    else:
-        index = 0
-        with lock:
-            for i, pending in enumerate(process_queue):
-                if pending.audio_id == uuid:
-                    index = i
-                    break
+    with lock:
+        index = next(
+            (i for i, pending in enumerate(process_queue) if pending.audio_id == uuid),
+            None,
+        )
+
+    if index is not None:
         return {
             "done": False,
             "state": "queued",
             "queue_position": index,
             "status": f"Queued ({index} in queue before this one)",
         }
+
+    # Not finished, not running, not failed and not in the queue: this id names
+    # nothing the server knows about.
+    #
+    # Previously this fell into the queued branch with position 0, so the page
+    # polled "Queued (0 in queue before this one)" forever. That is wrong for
+    # every way of reaching it -- a transcript the user deleted, one the
+    # retention sweep expired, a job lost to a restart (the queue is in memory),
+    # or a mistyped link -- and the failure mode is the worst one available,
+    # since waiting is exactly what the user should not do.
+    #
+    # 200 rather than 404: this is a successful answer to "what is the state of
+    # this id", and the client distinguishes state values, not status codes, the
+    # way it does for queued/processing/error. Every unknown id gets the same
+    # response whether or not it was ever real, so this discloses nothing.
+    return {
+        "done": False,
+        "state": "unknown",
+        "status": "This transcript is no longer available.",
+    }
+
+
+@app.delete("/transcript/{audio_id}")
+def delete_transcript(audio_id: str):
+    """Delete a transcript on the user's request, ahead of the retention sweep.
+
+    Mounted at /transcript rather than as a DELETE on /result/{id}.json: the
+    StaticFiles mount at /result matches on path prefix for *every* method, so
+    a route under it is never reached and would answer 405.
+
+    The UUID is the only credential this service has (see the note on
+    _client_key and the multi-user section of the README), so possessing it is
+    exactly the authorisation to read the transcript -- and therefore to
+    destroy it. No CSRF token accompanies this: the API is cookieless and
+    allow_credentials is False, so a cross-site request carries no ambient
+    authority and an attacker who already knows the id could equally just read
+    it. A forged DELETE is only possible for someone who has the link, which
+    makes it a link-sharing problem rather than a CSRF one.
+
+    Deleting only the transcript is sufficient to erase the job: the source
+    audio is already gone by the time one exists (see the `finally` in
+    process()). A queued or running job has no transcript yet and so cannot be
+    deleted here -- it is reported as 404, the same as an id that never
+    existed, since distinguishing the two would confirm the existence of
+    someone else's in-flight job to a caller guessing ids.
+    """
+    path = _transcript_path(audio_id)
+    if path is None:
+        # Malformed id: cannot name a transcript, so nothing to delete. Shaped
+        # like the not-found case on purpose -- the client's only sensible
+        # reaction to either is the same.
+        return JSONResponse(status_code=404, content={"error": "Transcript not found."})
+
+    try:
+        # missing_ok=False so an already-absent file is distinguishable from a
+        # real deletion: two tabs racing on the same id should not both claim
+        # success, and the 404 is what tells the second one it was already
+        # gone.
+        path.unlink()
+    except FileNotFoundError:
+        return JSONResponse(status_code=404, content={"error": "Transcript not found."})
+    except Exception:
+        # Same redaction rule as everywhere else here: the message would carry
+        # the absolute path and the volume layout.
+        print(f"Could not delete transcript {audio_id}:")
+        traceback.print_exc()
+        return JSONResponse(
+            status_code=500,
+            content={"error": "Could not delete the transcript. Please try again."},
+        )
+
+    # Drop any recorded failure for this id too, so the slate is genuinely
+    # clean. Keyed off the filename rather than the raw input, since that is
+    # the canonical spelling process() would have recorded it under. Harmless
+    # when absent -- a successful job has no entry here.
+    errors.pop(path.stem, None)
+
+    print(f"Deleted transcript {audio_id} on user request")
+    return {"deleted": True}
 
 
 def _status_line(m: dict, elapsed: float) -> str:
