@@ -1,0 +1,267 @@
+#   frontend  front/Dockerfile, build context = repo root
+#   backend   back/Dockerfile,  build context = back/
+#
+# pushed to $CI_REGISTRY_IMAGE/<component>/<ref-slug>:<version> and
+# :latest, where <version> is calver YYYY.MM.DD.<pipeline iid> 
+# 
+# image reference handed to later stages through a dotenv artifact
+# (FRONTEND_IMAGE / BACKEND_IMAGE) so test and scan always target the image
+# built in this pipeline, never whatever :latest happens to be
+
+default:
+  image: docker:28
+  services:
+    - docker:28-dind
+
+stages:
+  - build
+  - test
+  - scan
+
+variables:
+  DOCKER_TLS_CERTDIR: ""
+
+# --------------------------------------------------------------------------- #
+# Build
+# --------------------------------------------------------------------------- #
+
+.build:
+  stage: build
+  # COMPONENT (image path segment), CONTEXT, DOCKERFILE, and
+  # IMAGE_VAR (name of the dotenv variable handed to later stages)
+  before_script:
+    - export DATE=$(echo "${CI_JOB_STARTED_AT%%T*}" | tr '-' '.')
+    - export PATCH=$(printf '%06d' "$CI_PIPELINE_IID")
+    - export BUILD_VERSION="${DATE}.${PATCH}"
+    - export IMAGE_REPO="$CI_REGISTRY_IMAGE/$COMPONENT/$CI_COMMIT_REF_SLUG"
+    - echo "BUILD_VERSION=$BUILD_VERSION IMAGE_REPO=$IMAGE_REPO"
+  script:
+    - echo "$CI_REGISTRY_PASSWORD" | docker login $CI_REGISTRY -u $CI_REGISTRY_USER --password-stdin
+    # fetch the previous image for layer caching (not failing if absent)
+    - docker pull "$IMAGE_REPO:latest" || true
+    # BUILDKIT_INLINE_CACHE embeds cache metadata in the pushed image. without
+    # it, BuildKit (default builder in docker 23+) silently ignores
+    # --cache-from and the backend's ~7GB venv layer is rebuilt every time
+    - >
+      docker build
+      --pull
+      --cache-from "$IMAGE_REPO:latest"
+      --build-arg BUILDKIT_INLINE_CACHE=1
+      --label "org.opencontainers.image.title=$CI_PROJECT_TITLE-$COMPONENT"
+      --label "org.opencontainers.image.url=$CI_PROJECT_URL"
+      --label "org.opencontainers.image.source=$CI_PROJECT_URL"
+      --label "org.opencontainers.image.created=$CI_JOB_STARTED_AT"
+      --label "org.opencontainers.image.revision=$CI_COMMIT_SHA"
+      --label "org.opencontainers.image.version=$BUILD_VERSION"
+      --label "org.opencontainers.image.ref.name=$CI_COMMIT_REF_NAME"
+      --file "$DOCKERFILE"
+      --tag "$IMAGE_REPO:$BUILD_VERSION"
+      "$CONTEXT"
+    - docker push "$IMAGE_REPO:$BUILD_VERSION"
+    - docker tag "$IMAGE_REPO:$BUILD_VERSION" "$IMAGE_REPO:latest"
+    - docker push "$IMAGE_REPO:latest"
+    # expose the exact image reference to later stages
+    - echo "${IMAGE_VAR}=$IMAGE_REPO:$BUILD_VERSION" > build.env
+  artifacts:
+    reports:
+      dotenv: build.env
+
+Build frontend:
+  extends: .build
+  variables:
+    COMPONENT: frontend
+    # front/Dockerfile copies package.json, src/ and front/, so the context is
+    # the repo root
+    CONTEXT: .
+    DOCKERFILE: front/Dockerfile
+    IMAGE_VAR: FRONTEND_IMAGE
+
+Build backend:
+  extends: .build
+  # the CUDA/torch image is ~12GB; allow for slow pulls/pushes
+  timeout: 2h
+  variables:
+    COMPONENT: backend
+    CONTEXT: back
+    DOCKERFILE: back/Dockerfile
+    IMAGE_VAR: BACKEND_IMAGE
+
+# --------------------------------------------------------------------------- #
+# Test
+# --------------------------------------------------------------------------- #
+
+# runs the frontend next to a stub backend inside dind. nginx resolves its
+# upstream (whisper-web-backend, see front/nginx.conf) at startup and refuses
+# to start if it cannot so the stub must exist under exactly that name. 
+# user-defined docker network provides the DNS for it -- plain GitLab
+# `services:` cannot, since services are not linked to each other
+Test frontend:
+  stage: test
+  needs:
+    - Build frontend
+  variables:
+    GIT_STRATEGY: none
+  script:
+    - test -n "$FRONTEND_IMAGE" || { echo "FRONTEND_IMAGE is empty; dotenv artifact from Build frontend missing"; exit 1; }
+    - echo "Testing $FRONTEND_IMAGE"
+    - echo "$CI_REGISTRY_PASSWORD" | docker login $CI_REGISTRY -u $CI_REGISTRY_USER --password-stdin
+    - docker network create ci-net
+    - docker run -d --name whisper-web-backend --network ci-net busybox:stable
+        sh -c 'mkdir -p /www && echo "{\"status\":\"ok\"}" > /www/health && exec httpd -f -p 49585 -h /www'
+    - docker run -d --name frontend --network ci-net
+        -e TITLE=ci-title -e HELP_URL=https://example.invalid/help "$FRONTEND_IMAGE"
+    # wait for nginx
+    - |
+      for i in $(seq 1 30); do
+        docker exec frontend wget -q -O /dev/null http://127.0.0.1:8080/ && break
+        sleep 1
+      done
+    # SPA shell served, and SPA fallback routes unknown paths to index.html
+    - docker exec frontend wget -q -O - http://127.0.0.1:8080/ | grep -q '<div id="app">'
+    - docker exec frontend wget -q -O - http://127.0.0.1:8080/some/spa/route | grep -q '<div id="app">'
+    # entrypoint rendered runtime config into env.js
+    - docker exec frontend wget -q -O - http://127.0.0.1:8080/env.js | grep -q 'TITLE.*"ci-title"'
+    # /api/ is proxied to the backend with the prefix stripped
+    - docker exec frontend wget -q -O - http://127.0.0.1:8080/api/health | grep -q '"ok"'
+    # runs unprivileged
+    - test "$(docker exec frontend id -u)" != 0
+  after_script:
+    - docker logs frontend || true
+
+# runs inside the backend image itself. no GPU on the CI runner, and
+# wp.py loads the Whisper and pyannote models (CUDA + HF_TOKEN) at import time,
+# so this:
+#   1. imports the heavy ML stack to prove the dependency set installs and
+#      loads (catches a broken uv.lock / CUDA wheel mismatch), then
+#   2. starts the real FastAPI app with only the `wp` module stubbed out, and
+#      exercises the HTTP API end to end: upload -> queue -> worker -> result
+#      -> delete, plus the input validation and upload size limit.
+# -> model inference itself is not covered
+Test backend:
+  stage: test
+  needs:
+    - Build backend
+  timeout: 1h
+  image:
+    name: $BACKEND_IMAGE
+    # skip the NVIDIA banner entrypoint
+    entrypoint: [""]
+  # the job runs in the built image directly; no docker daemon needed
+  services: []
+  variables:
+    GIT_STRATEGY: none
+    # tiny limit so the 413 path can be tested with a small body
+    MAX_UPLOAD_MB: "1"
+  script:
+    - cd /app
+    - python -c "import whisperx, whisperx.diarize, torch, pyannote.audio, pynvml; print('ML deps import ok, torch', torch.__version__)"
+    - |
+      cat > /tmp/ci_server.py <<'PY'
+      import sys, threading, types
+
+      # Stand-in for wp.py, which needs a GPU and HF_TOKEN to import.
+      wp = types.ModuleType("wp")
+      class AudioTooLong(Exception):
+          pass
+      def diarized_transcribe(fp, **kwargs):
+          chunks = [{"timestamp": (0.0, 1.0), "text": " ci stub", "speaker": "SPEAKER_00"}]
+          return {"text": " ci stub", "chunks": chunks}, (0.0, 0.0)
+      wp.AudioTooLong = AudioTooLong
+      wp.diarized_transcribe = diarized_transcribe
+      sys.modules["wp"] = wp
+
+      # same startup as main.py's __main__ block.
+      import uvicorn, main
+      main.metrics.start_sampler()
+      threading.Thread(target=main.process, daemon=True).start()
+      uvicorn.run(main.app, host="127.0.0.1", port=49585)
+      PY
+    - python /tmp/ci_server.py > /tmp/server.log 2>&1 &
+    - export B=http://127.0.0.1:49585
+    - for i in $(seq 1 60); do curl -sf $B/health >/dev/null && break; sleep 1; done
+    - curl -sf $B/health | grep -q '"ok"'
+    # happy path
+    - ffmpeg -loglevel error -f lavfi -i sine=frequency=440:duration=1 /tmp/tone.wav
+    - code=$(curl -s -o /tmp/upload.json -w '%{http_code}' -F file=@/tmp/tone.wav -F language=en $B/upload)
+    - test "$code" = 200 || { cat /tmp/upload.json; exit 1; }
+    - ID=$(python -c "import json; print(json.load(open('/tmp/upload.json'))['audio_id'])")
+    - for i in $(seq 1 30); do curl -sf $B/progress/$ID | grep -q '"done":true' && break; sleep 1; done
+    - curl -sf $B/progress/$ID | grep -q '"done":true'
+    - curl -sf $B/result/$ID.json | grep -q 'ci stub'
+    - curl -sf -X DELETE $B/transcript/$ID | grep -q '"deleted":true'
+    - curl -sf $B/progress/$ID | grep -q '"state":"unknown"'
+    # rejected input
+    - test "$(curl -s -o /dev/null -w '%{http_code}' -F 'file=@/tmp/tone.wav;filename=x.exe' $B/upload)" = 400
+    - test "$(curl -s -o /dev/null -w '%{http_code}' -F file=@/tmp/tone.wav -F language=xx $B/upload)" = 400
+    - head -c 2097152 /dev/zero > /tmp/big.wav
+    - test "$(curl -s -o /dev/null -w '%{http_code}' -F file=@/tmp/big.wav $B/upload)" = 413
+    # runs unprivileged
+    - test "$(id -u)" != 0
+  after_script:
+    - cat /tmp/server.log || true
+
+# --------------------------------------------------------------------------- #
+# Scan
+# --------------------------------------------------------------------------- #
+
+# scans the image once to JSON, then renders the GitLab report, the console
+# table and the CRITICAL gate from that single result -- rather than
+# re-analysing the image three times, which matters for the ~12GB backend.
+.container_scanning:
+  stage: scan
+  image:
+    name: docker.io/aquasec/trivy@sha256:ee940acbf1f58ebadb42d01434ce4609530bf1b52536afbd1eee66cd7123c5c9
+    # entrypoint needs to be unset for the script section to work
+    entrypoint: [""]
+  # Trivy pulls straight from the registry; no docker daemon needed
+  services: []
+  variables:
+    GIT_STRATEGY: none
+    TRIVY_USERNAME: "$CI_REGISTRY_USER"
+    TRIVY_PASSWORD: "$CI_REGISTRY_PASSWORD"
+    TRIVY_AUTH_URL: "$CI_REGISTRY"
+    TRIVY_IMAGE_SRC: remote
+    TRIVY_NO_PROGRESS: "true"
+    TRIVY_CACHE_DIR: ".trivycache/"
+    # default is 5m, far too short for the backend image
+    TRIVY_TIMEOUT: 45m
+  # set per job: SCAN_IMAGE (image reference) and REPORT (report filename)
+  script:
+    - trivy --version
+    - test -n "$SCAN_IMAGE" || { echo "image reference is empty; dotenv artifact from the build job missing"; exit 1; }
+    - echo "Scanning $SCAN_IMAGE"
+    - time trivy image --download-db-only
+    - time trivy image --scanners vuln --format json --output /tmp/trivy.json "$SCAN_IMAGE"
+    # GitLab report, placed in $CI_PROJECT_DIR so `artifacts:` can take it from there
+    - trivy convert --format template --template "@/contrib/gitlab.tpl"
+        --output "$CI_PROJECT_DIR/$REPORT" /tmp/trivy.json
+    # prints HIGH/CRITICAL findings
+    - trivy convert --severity HIGH,CRITICAL /tmp/trivy.json
+    # fail on critical vulnerabilities
+    - trivy convert --exit-code 1 --severity CRITICAL --scanners vuln --format table --report summary /tmp/trivy.json
+  #allow_failure: true
+  cache:
+    key: trivy
+    paths:
+      - .trivycache/
+  artifacts:
+    when: always
+    reports:
+      container_scanning: $REPORT
+
+container_scanning frontend:
+  extends: .container_scanning
+  needs:
+    - Build frontend
+  variables:
+    SCAN_IMAGE: $FRONTEND_IMAGE
+    REPORT: gl-container-scanning-report-frontend.json
+
+container_scanning backend:
+  extends: .container_scanning
+  needs:
+    - Build backend
+  timeout: 1h
+  variables:
+    SCAN_IMAGE: $BACKEND_IMAGE
+    REPORT: gl-container-scanning-report-backend.json
