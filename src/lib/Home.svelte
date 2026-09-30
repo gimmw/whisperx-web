@@ -427,8 +427,15 @@
 </div>
 
 <style lang="sass">
-  $c-emp: #86a2ff
-  $c-error: #ff8e8e
+  // Aliases for the theme tokens in app.css. Kept as Sass variables so the
+  // rules below read the same as before, but they now resolve per-scheme at
+  // runtime instead of baking a dark-only literal into the stylesheet.
+  //
+  // These hold var() references, so they cannot be passed to Sass colour
+  // functions -- rgba($c-emp, 0.12) would be a compile error. Where a tinted
+  // accent is needed, use the --c-emp-tint tokens instead.
+  $c-emp: var(--c-emp)
+  $c-error: var(--c-error)
 
   // Where the settings modal stops being a full-width bottom sheet and becomes
   // a centred dialog. This is presentation only -- it is a modal either side of
@@ -489,7 +496,7 @@
     box-sizing: border-box
     border: 2px dashed $c-emp
     border-radius: 1rem
-    background: rgba(white, 0.06)
+    background: var(--c-surface)
     backdrop-filter: blur(10px)
 
     display: flex
@@ -509,7 +516,7 @@
     transition: background 0.2s ease, border-color 0.2s ease
 
     &:hover
-      background: rgba(white, 0.1)
+      background: var(--c-surface-hover)
 
     // The file input is visually hidden, so its focus ring would be invisible.
     // Project it onto this label instead, otherwise keyboard users get no
@@ -519,8 +526,10 @@
       outline-offset: 3px
 
   .drop-area.dragging
-    background: rgba(134, 162, 255, 0.18)
-    border-color: white
+    background: var(--c-emp-tint-strong)
+    // Contrasts against the accent border of the resting state, in whichever
+    // direction the theme runs: near-white on dark, near-black on light.
+    border-color: var(--c-text-strong)
 
   .drop-area.has-error
     border-color: $c-error
@@ -567,9 +576,9 @@
     gap: 0.4rem
     padding: 0.5rem 0.9rem
     border-radius: 999px
-    border: 1px solid rgba(white, 0.25)
-    background: rgba(white, 0.08)
-    color: rgba(white, 0.9)
+    border: 1px solid var(--c-border)
+    background: var(--c-surface-raised)
+    color: var(--c-text)
     font-size: 0.9rem
     font-family: inherit
     cursor: pointer
@@ -583,14 +592,14 @@
 
     &:hover
       border-color: $c-emp
-      color: white
+      color: var(--c-text-strong)
 
   // Non-default settings are in effect. Tinted rather than merely labelled,
   // so it reads as "changed" at a glance without needing the text.
   .settings-btn.modified
     border-color: $c-emp
     color: $c-emp
-    background: rgba(134, 162, 255, 0.12)
+    background: var(--c-emp-tint)
 
   .settings-btn-text
     overflow: hidden
@@ -606,19 +615,21 @@
     min-width: 56px
     border-radius: 50%
     background: $c-emp
-    color: white
-    box-shadow: 0 3px 5px rgba(black, 0.4)
+    color: var(--c-on-emp)
+    box-shadow: 0 3px 5px var(--c-shadow)
     cursor: pointer
 
     :global(.file-input:focus-visible) ~ .controls &
-      outline: 2px solid white
+      // The button is a solid accent fill, so the ring has to contrast with
+      // the accent rather than with the page.
+      outline: 2px solid var(--c-text-strong)
       outline-offset: 2px
 
   .options
     display: flex
     flex-direction: column
     gap: 0.75rem
-    color: white
+    color: var(--c-text)
     font-size: 0.9rem
 
     .option-label,
@@ -637,26 +648,26 @@
       box-sizing: border-box
       width: 100%
       padding: 0.5rem
-      border: 1px solid rgba(white, 0.3)
+      border: 1px solid var(--c-field-border)
       border-radius: 0.4rem
-      background: rgba(white, 0.1)
-      color: white
+      background: var(--c-field-bg)
+      color: var(--c-text)
       font-size: 16px // < 16px causes iOS Safari to zoom on focus
       font-family: inherit
       min-height: 44px
 
       &::placeholder
-        color: rgba(white, 0.4)
+        color: var(--c-text-faint)
 
     select option
-      background: #242424
-      color: white
+      background: var(--c-option-bg)
+      color: var(--c-text)
 
     .option-hint
       margin: -0.25rem 0 0
       font-size: 0.75rem
       line-height: 1.4
-      color: rgba(white, 0.6)
+      color: var(--c-text-muted)
 
     .toggle
       display: flex
@@ -700,8 +711,8 @@
     right: 0
     bottom: 0
 
-    background: #1e1e1e
-    border-top: 1px solid rgba(white, 0.15)
+    background: var(--c-panel-bg)
+    border-top: 1px solid var(--c-panel-border)
     border-top-left-radius: 1rem
     border-top-right-radius: 1rem
     padding: 1rem
@@ -735,10 +746,10 @@
       // dialog at its full 30rem on viewports narrower than that.
       width: #{"min(30rem, calc(100vw - 2rem))"}
       border-radius: 1rem
-      border: 1px solid rgba(white, 0.15)
+      border: 1px solid var(--c-panel-border)
       padding: 1.25rem
       max-height: min(85dvh, 40rem)
-      box-shadow: 0 10px 40px rgba(black, 0.5)
+      box-shadow: 0 10px 40px var(--c-shadow-lg)
 
       // translate(-50%, -50%) centres it; the extra Y offset is the entry
       // animation, so the closed state sits slightly low and fades up.
@@ -757,7 +768,7 @@
     // Reset the <button> defaults, since this is a bare hit target.
     border: none
     padding: 0
-    background: rgba(black, 0.5)
+    background: var(--c-backdrop)
     cursor: default
 
   .sheet-header
@@ -769,7 +780,7 @@
   .sheet-title
     font-size: 1rem
     font-weight: 600
-    color: white
+    color: var(--c-text-strong)
 
   .sheet-close
     display: inline-flex
@@ -780,11 +791,11 @@
     border: none
     border-radius: 50%
     background: transparent
-    color: rgba(white, 0.7)
+    color: var(--c-text-muted)
     cursor: pointer
 
     &:hover
-      color: white
+      color: var(--c-text-strong)
 
   // Respect reduced-motion: the slide/fade is decorative.
   @media (prefers-reduced-motion: reduce)

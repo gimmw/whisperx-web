@@ -263,11 +263,11 @@
         align-items: center
         gap: 0.35rem
         font-size: 0.9rem
-        color: rgba(255, 255, 255, 0.6)
+        color: var(--c-text-muted)
         transition: color 0.2s ease
 
         &:hover
-          color: rgba(255, 255, 255, 0.95)
+          color: var(--c-text-strong)
 
     .status-line
       opacity: 0.85
@@ -305,11 +305,11 @@
 
     .poll-error
       font-size: 0.85em
-      color: #ff9595
+      color: var(--c-error)
       opacity: 0.8
 
     .error-line
-      color: #ff9595
+      color: var(--c-error)
 
     .error-id
       font-size: 0.8em
@@ -333,11 +333,11 @@
 
           .speaker
             font-weight: bold
-            color: #ff9595
+            color: var(--c-speaker)
           .s0
-            color: #59ffa1
+            color: var(--c-speaker-0)
           .s1
-            color: #597aff
+            color: var(--c-speaker-1)
 
           .time
             font-family: monospace
