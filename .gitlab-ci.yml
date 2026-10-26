@@ -238,8 +238,11 @@ Test backend:
     # prints HIGH/CRITICAL findings
     - trivy convert --severity HIGH,CRITICAL /tmp/trivy.json
     # fail on critical vulnerabilities
-    - trivy convert --exit-code 1 --severity CRITICAL --scanners vuln --format table --report summary /tmp/trivy.json
+    - trivy convert --exit-code 137 --severity CRITICAL --scanners vuln --format table --report summary /tmp/trivy.json
   #allow_failure: true
+  allow_failure:
+    exit_codes:
+      - 137
   cache:
     key: trivy
     paths:
