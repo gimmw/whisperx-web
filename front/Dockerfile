@@ -1,5 +1,6 @@
 # Stage 1: Build the Svelte/Vite frontend
-FROM node:22-alpine AS build
+#FROM node:22-alpine AS build
+FROM node:26.12.1-alpine3.24 AS build
 
 WORKDIR /app
 
@@ -16,8 +17,11 @@ COPY src/ src/
 # Build production assets
 RUN yarn build
 
+##########################################################################
+
 # Stage 2: Serve with unprivileged nginx
-FROM nginxinc/nginx-unprivileged:stable-alpine
+#FROM nginxinc/nginx-unprivileged:stable-alpine
+FROM nginxinc/nginx-unprivileged:1.31.8-alpine3.24
 
 # Add nginx config for SPA routing (all paths -> index.html)
 COPY front/nginx.conf /etc/nginx/conf.d/default.conf
