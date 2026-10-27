@@ -147,6 +147,20 @@ Test frontend:
         docker network inspect ci-net
         docker logs frontend || true
         docker logs whisper-web-backend || true
+        # what env does the container actually have? if a *_proxy var is set,
+        # wget sends the request to that proxy instead of to nginx -- the
+        # proxy answers (often 503) and nginx's access log stays empty
+        docker exec frontend env
+        # same request with any proxy env explicitly cleared
+        docker exec -e http_proxy= -e HTTP_PROXY= -e https_proxy= -e HTTPS_PROXY= frontend \
+          wget -q -O - http://127.0.0.1:8080/ || true
+        # raw sockets, no wget involved: whatever answers on 8080 (and on the
+        # stub) identifies itself in the response headers -- nginx, or a
+        # proxy sitting in front of it
+        STUB_IP=$(docker inspect whisper-web-backend --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')
+        echo "stub ip: $STUB_IP"
+        docker exec frontend sh -c 'printf "GET / HTTP/1.0\r\nHost: x\r\n\r\n" | busybox nc -w 3 127.0.0.1 8080' || true
+        docker exec frontend sh -c "printf 'GET /health HTTP/1.0\r\nHost: x\r\n\r\n' | busybox nc -w 3 $STUB_IP 49585" || true
         exit 1
       }
     # each check is labelled so the log shows exactly which one failed
