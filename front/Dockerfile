@@ -21,7 +21,7 @@ RUN yarn build
 
 # Stage 2: Serve with unprivileged nginx
 #FROM nginxinc/nginx-unprivileged:stable-alpine
-FROM nginxinc/nginx-unprivileged:1.31.8-alpine3.24
+FROM nginx/nginx-unprivileged:1.31.8-alpine3.24
 
 # Add nginx config for SPA routing (all paths -> index.html)
 COPY front/nginx.conf /etc/nginx/conf.d/default.conf
