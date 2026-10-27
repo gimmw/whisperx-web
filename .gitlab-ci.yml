@@ -2,12 +2,12 @@
 #   backend   back/Dockerfile,  build context = back/
 #
 # pushed to $CI_REGISTRY_IMAGE/<component>/<ref-slug>:<version> and
-# :latest, where <version> is calver YYYY.MM.DD.<pipeline iid> 
-# 
+# :latest, where <version> is calver YYYY.MM.DD.<pipeline iid>
+#
 # image reference handed to later stages through a dotenv artifact
 # (FRONTEND_IMAGE / BACKEND_IMAGE) so test and scan always target the image
 # built in this pipeline, never whatever :latest happens to be
-
+#
 default:
   image: docker:28
   services:
@@ -30,22 +30,37 @@ variables:
   # COMPONENT (image path segment), CONTEXT, DOCKERFILE, and
   # IMAGE_VAR (name of the dotenv variable handed to later stages)
   before_script:
-    - export DATE=$(echo "${CI_JOB_STARTED_AT%%T*}" | tr '-' '.')
+    # CI_PIPELINE_CREATED_AT, not CI_JOB_STARTED_AT: the version is a
+    # property of the pipeline, so a retried build job re-uses (and
+    # idempotently re-pushes) the same version instead of minting a new one,
+    # and the two component jobs can't disagree if the pipeline crosses
+    # midnight UTC
+    - export DATE=$(echo "${CI_PIPELINE_CREATED_AT%%T*}" | tr '-' '.')
     - export PATCH=$(printf '%06d' "$CI_PIPELINE_IID")
     - export BUILD_VERSION="${DATE}.${PATCH}"
+    - test -n "$BUILD_VERSION" || { echo "could not compute BUILD_VERSION"; exit 1; }
     - export IMAGE_REPO="$CI_REGISTRY_IMAGE/$COMPONENT/$CI_COMMIT_REF_SLUG"
     - echo "BUILD_VERSION=$BUILD_VERSION IMAGE_REPO=$IMAGE_REPO"
   script:
     - echo "$CI_REGISTRY_PASSWORD" | docker login $CI_REGISTRY -u $CI_REGISTRY_USER --password-stdin
-    # fetch the previous image for layer caching (not failing if absent)
-    - docker pull "$IMAGE_REPO:latest" || true
+    # fetch the previous image for layer caching; only a successful pull may
+    # be handed to --cache-from (fresh branches have no previous image, and
+    # buildx would try to resolve a dangling ref itself -- fatal on some
+    # BuildKit versions)
+    - CACHE_FROM=""
+    - >
+      if docker pull "$IMAGE_REPO:latest"; then
+        CACHE_FROM="--cache-from $IMAGE_REPO:latest"
+      else
+        echo "no previous image at $IMAGE_REPO:latest; building cold"
+      fi
     # BUILDKIT_INLINE_CACHE embeds cache metadata in the pushed image. without
     # it, BuildKit (default builder in docker 23+) silently ignores
     # --cache-from and the backend's ~7GB venv layer is rebuilt every time
     - >
       docker build
       --pull
-      --cache-from "$IMAGE_REPO:latest"
+      $CACHE_FROM
       --build-arg BUILDKIT_INLINE_CACHE=1
       --label "org.opencontainers.image.title=$CI_PROJECT_TITLE-$COMPONENT"
       --label "org.opencontainers.image.url=$CI_PROJECT_URL"
