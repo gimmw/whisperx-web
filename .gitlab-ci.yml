@@ -123,25 +123,58 @@ Test frontend:
     - docker network create ci-net
     - docker run -d --name whisper-web-backend --network ci-net busybox:stable
         sh -c 'mkdir -p /www && echo "{\"status\":\"ok\"}" > /www/health && exec httpd -f -p 49585 -h /www'
-    - docker run -d --name frontend --network ci-net
-        -e TITLE=ci-title -e HELP_URL=https://example.invalid/help "$FRONTEND_IMAGE"
-    # wait for nginx
+    # nginx resolves whisper-web-backend at startup and exits if it cannot,
+    # so make sure the stub is reachable by name before starting the frontend
     - |
       for i in $(seq 1 30); do
-        docker exec frontend wget -q -O /dev/null http://127.0.0.1:8080/ && break
+        docker run --rm --network ci-net busybox:stable
+          wget -q -O /dev/null http://whisper-web-backend:49585/health 2>/dev/null && break
         sleep 1
       done
+    - docker run -d --name frontend --network ci-net
+        -e TITLE=ci-title -e HELP_URL=https://example.invalid/help "$FRONTEND_IMAGE"
+    # wait for nginx; if it never answers, dump the state so a failed run is
+    # diagnosable from the log alone (this image logs nginx's access and
+    # error log to stdout/stderr)
+    - |
+      for i in $(seq 1 30); do
+        docker exec frontend wget -q -O /dev/null http://127.0.0.1:8080/ 2>/dev/null && break
+        sleep 1
+      done
+      docker exec frontend wget -q -O /dev/null http://127.0.0.1:8080/ || {
+        echo "frontend never came up; state:"
+        docker ps -a
+        docker network inspect ci-net
+        docker logs frontend || true
+        docker logs whisper-web-backend || true
+        exit 1
+      }
+    # each check is labelled so the log shows exactly which one failed
     # SPA shell served, and SPA fallback routes unknown paths to index.html
+    - echo "--- GET / (SPA shell)"
     - docker exec frontend wget -q -O - http://127.0.0.1:8080/ | grep -q '<div id="app">'
+    - echo "--- GET /some/spa/route (SPA fallback)"
     - docker exec frontend wget -q -O - http://127.0.0.1:8080/some/spa/route | grep -q '<div id="app">'
     # entrypoint rendered runtime config into env.js
+    - echo "--- GET /env.js (runtime config)"
     - docker exec frontend wget -q -O - http://127.0.0.1:8080/env.js | grep -q 'TITLE.*"ci-title"'
     # /api/ is proxied to the backend with the prefix stripped
+    - echo "--- GET /api/health (proxied to stub backend)"
     - docker exec frontend wget -q -O - http://127.0.0.1:8080/api/health | grep -q '"ok"'
+    # the stub reachable by name directly: nginx resolved
+    # whisper-web-backend at startup and keeps using that IP for the whole
+    # container's life, so this proves the name resolves to THIS stub --
+    # if dind's DNS leaked the name elsewhere, the proxied check above would
+    # hit the other host instead
+    - echo "--- stub backend reachable by name from frontend container"
+    - docker exec frontend wget -q -O - http://whisper-web-backend:49585/health | grep -q '"ok"'
     # runs unprivileged
+    - echo "--- runs unprivileged"
     - test "$(docker exec frontend id -u)" != 0
   after_script:
+    - docker ps -a
     - docker logs frontend || true
+    - docker logs whisper-web-backend || true
 
 # runs inside the backend image itself. no GPU on the CI runner, and
 # wp.py loads the Whisper and pyannote models (CUDA + HF_TOKEN) at import time,
