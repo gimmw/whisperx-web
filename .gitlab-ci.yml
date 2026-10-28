@@ -136,12 +136,10 @@ Test frontend:
       # nginx resolves whisper-web-backend at startup and exits if it cannot,
       # so make sure the stub is reachable by name before starting the frontend
       for i in $(seq 1 30); do
-        docker run --rm --network ci-net busybox:stable
-          sh -c 'unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY no_proxy NO_PROXY; wget -q -O /dev/null http://whisper-web-backend:49585/health' 2>/dev/null && break
+        docker run --rm --network ci-net busybox:stable sh -c 'unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY no_proxy NO_PROXY; wget -q -O /dev/null http://whisper-web-backend:49585/health' 2>/dev/null && break
         sleep 1
       done
-      docker run -d --name frontend --network ci-net
-        -e TITLE=ci-title -e HELP_URL=https://example.invalid/help "$FRONTEND_IMAGE"
+      docker run -d --name frontend --network ci-net -e TITLE=ci-title -e HELP_URL=https://example.invalid/help "$FRONTEND_IMAGE"
       # wait for nginx; if it never answers, dump the state so a failed run is
       # diagnosable from the log alone (this image logs nginx's access and
       # error log to stdout/stderr)
